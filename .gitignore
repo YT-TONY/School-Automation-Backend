@@ -6,3 +6,5 @@ __pycache__/
 .pytest_cache/
 *.db
 EOF
+
+seed_super_admin.py
