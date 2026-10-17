@@ -1,14 +1,18 @@
-#app/main.py
+# app/main.py
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.tenant_middleware import TenantMiddleware
-from app.api.v1.endpoints import schools, auth
+from app.api.v1.router import api_router
 
-app = FastAPI(title="Multi-Tenant School Platform API")
+app = FastAPI(
+    title="Multi-Tenant School Platform API",
+    description="Backend API supporting dynamic white-label school portals and PIN result checking.",
+    version="1.0.0"
+)
 
-# Configure CORS for multi-domain support
+# Configure CORS for multi-domain white-label support
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows dynamic custom school domains
@@ -20,11 +24,13 @@ app.add_middleware(
 # Attach Tenant Resolution Middleware
 app.add_middleware(TenantMiddleware)
 
-# Include Routers
-app.add_prefix = "/api/v1"
-app.include_router(schools.router, prefix="/api/v1/schools", tags=["Schools"])
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+# Attach Centralized V1 API Router (Includes /schools, /auth, /students, /results, /pins)
+app.include_router(api_router, prefix="/api/v1")
 
 @app.get("/")
 async def root():
-    return {"status": "online", "system": "Multi-Tenant School Backend"}
+    return {
+        "status": "online",
+        "system": "Multi-Tenant School Backend Engine",
+        "version": "1.0.0"
+    }
