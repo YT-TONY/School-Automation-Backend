@@ -1,48 +1,48 @@
-#app/api/v1/endpoints/results.py
+# app/api/v1/endpoints/results.py
 
+import uuid
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel
-from typing import List, Optional
-import uuid
 
 from app.core.database import get_db
-from app.core.tenant import get_current_tenant
-from app.models.result import Result
+from app.core.tenant import require_tenant_id
+from app.models.academic import Subject
 from app.models.pin import ResultPin
+from app.models.result import Result, ResultStatus
 from app.models.student import Student
+from app.schemas.result import (
+    CheckResultRequest,
+    ResultEntry,
+    ResultStatusUpdate,
+    ScoreDetail,
+    StatusUpdateResponse,
+    StudentResultSheet,
+)
 
 router = APIRouter()
 
-class ResultEntry(BaseModel):
-    student_id: uuid.UUID
-    subject_id: uuid.UUID
-    session: str
-    term: str
-    ca_score: float
-    exam_score: float
-
-class CheckResultRequest(BaseModel):
-    admission_number: str
-    pin_code: str
-    session: str
-    term: str
+# --- 1. Batch Score Ingestion ---
 
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
     entries: List[ResultEntry],
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    tenant_id = get_current_tenant()
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Tenant context missing.")
-
     db_objects = []
     for entry in entries:
         total = entry.ca_score + entry.exam_score
-        grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
-        
+        grade = (
+            "A" if total >= 70
+            else "B" if total >= 60
+            else "C" if total >= 50
+            else "D" if total >= 45
+            else "F"
+        )
+
         res = Result(
             school_id=tenant_id,
             student_id=entry.student_id,
@@ -52,23 +52,118 @@ async def upload_results(
             ca_score=entry.ca_score,
             exam_score=entry.exam_score,
             total_score=total,
-            grade=grade
+            grade=grade,
+            status=ResultStatus.DRAFT
         )
         db_objects.append(res)
 
     db.add_all(db_objects)
     await db.commit()
-    return {"inserted": len(db_objects)}
+    return {"inserted": len(db_objects), "status": ResultStatus.DRAFT}
 
-@router.post("/verify-and-view")
-async def verify_pin_and_get_results(
-    payload: CheckResultRequest,
+
+# --- 2. Result Approval Workflow State Transition ---
+
+@router.patch("/status", response_model=StatusUpdateResponse)
+async def update_result_status(
+    payload: ResultStatusUpdate,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    tenant_id = get_current_tenant()
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Tenant context missing.")
+    stmt = (
+        update(Result)
+        .where(
+            Result.school_id == tenant_id,
+            Result.session == payload.session,
+            Result.term == payload.term
+        )
+        .values(status=payload.target_status)
+    )
 
+    if payload.student_id:
+        stmt = stmt.where(Result.student_id == payload.student_id)
+
+    if payload.class_arm_id:
+        student_subquery = select(Student.id).where(
+            Student.school_id == tenant_id,
+            Student.class_arm_id == payload.class_arm_id
+        )
+        stmt = stmt.where(Result.student_id.in_(student_subquery))
+
+    res = await db.execute(stmt)
+    await db.commit()
+
+    return {
+        "updated_count": res.rowcount,
+        "new_status": payload.target_status,
+        "message": f"Successfully transitioned {res.rowcount} result entries to {payload.target_status.value}."
+    }
+
+
+# --- 3. Admin / Teacher PIN-Free Result Sheet Viewer ---
+
+@router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
+async def get_admin_student_results(
+    student_id: uuid.UUID,
+    session: str,
+    term: str,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    db: AsyncSession = Depends(get_db)
+):
+    student_q = select(Student).where(
+        Student.id == student_id,
+        Student.school_id == tenant_id
+    )
+    student_res = await db.execute(student_q)
+    student = student_res.scalars().first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student record not found.")
+
+    results_q = (
+        select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
+        .join(Subject, Result.subject_id == Subject.id)
+        .where(
+            Result.student_id == student.id,
+            Result.session == session,
+            Result.term == term,
+            Result.school_id == tenant_id
+        )
+    )
+    results_res = await db.execute(results_q)
+    rows = results_res.all()
+
+    scores = [
+        ScoreDetail(
+            subject_id=r.Result.subject_id,
+            subject_name=r.subject_name,
+            subject_code=r.subject_code,
+            ca_score=r.Result.ca_score,
+            exam_score=r.Result.exam_score,
+            total_score=r.Result.total_score,
+            grade=r.Result.grade,
+            status=r.Result.status
+        ) for r in rows
+    ]
+
+    return StudentResultSheet(
+        student_id=student.id,
+        student_name=student.full_name,
+        admission_number=student.admission_number,
+        session=session,
+        term=term,
+        pin_remaining_uses=None,
+        results=scores
+    )
+
+
+# --- 4. Public PIN-Protected Result Verification Engine ---
+
+@router.post("/verify-and-view", response_model=StudentResultSheet)
+async def verify_pin_and_get_results(
+    payload: CheckResultRequest,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    db: AsyncSession = Depends(get_db)
+):
     # 1. Verify Student
     student_q = select(Student).where(
         Student.admission_number == payload.admission_number,
@@ -82,45 +177,61 @@ async def verify_pin_and_get_results(
     # 2. Verify Scratch PIN
     pin_q = select(ResultPin).where(
         ResultPin.pin_code == payload.pin_code,
-        ResultPin.school_id == tenant_id
+        ResultPin.school_id == tenant_id,
+        ResultPin.is_active == True
     )
     pin_res = await db.execute(pin_q)
     pin = pin_res.scalars().first()
 
     if not pin:
-        raise HTTPException(status_code=400, detail="Invalid scratch PIN code.")
-    if pin.use_count >= pin.max_uses:
+        raise HTTPException(status_code=400, detail="Invalid or deactivated scratch PIN code.")
+    if pin.times_used >= pin.max_uses:
         raise HTTPException(status_code=400, detail="Scratch PIN usage limit exceeded.")
 
-    # 3. Deduct/Increment PIN Usage
-    pin.use_count += 1
-    await db.commit()
-
-    # 4. Fetch Results
-    results_q = select(Result).where(
-        Result.student_id == student.id,
-        Result.session == payload.session,
-        Result.term == payload.term,
-        Result.school_id == tenant_id
+    # 3. Query ONLY PUBLISHED Results
+    results_q = (
+        select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
+        .join(Subject, Result.subject_id == Subject.id)
+        .where(
+            Result.student_id == student.id,
+            Result.session == payload.session,
+            Result.term == payload.term,
+            Result.school_id == tenant_id,
+            Result.status == ResultStatus.PUBLISHED
+        )
     )
     results_res = await db.execute(results_q)
-    scores = results_res.scalars().all()
+    rows = results_res.all()
 
-    return {
-        "student": {
-            "name": f"{student.first_name} {student.last_name}",
-            "admission_number": student.admission_number
-        },
-        "session": payload.session,
-        "term": payload.term,
-        "pin_remaining_uses": pin.max_uses - pin.use_count,
-        "results": [
-            {
-                "subject_id": str(s.subject_id),
-                "ca_score": s.ca_score,
-                "exam_score": s.exam_score,
-                "total_score": s.total_score,
-                "grade": s.grade
-            } for s in scores
-        ]
-    }
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No published results available for this term/session yet. Contact your school administration."
+        )
+
+    # 4. Deduct/Increment PIN Usage only when published results exist
+    pin.times_used += 1
+    await db.commit()
+
+    scores = [
+        ScoreDetail(
+            subject_id=r.Result.subject_id,
+            subject_name=r.subject_name,
+            subject_code=r.subject_code,
+            ca_score=r.Result.ca_score,
+            exam_score=r.Result.exam_score,
+            total_score=r.Result.total_score,
+            grade=r.Result.grade,
+            status=r.Result.status
+        ) for r in rows
+    ]
+
+    return StudentResultSheet(
+        student_id=student.id,
+        student_name=student.full_name,
+        admission_number=student.admission_number,
+        session=payload.session,
+        term=payload.term,
+        pin_remaining_uses=pin.max_uses - pin.times_used,
+        results=scores
+    )
