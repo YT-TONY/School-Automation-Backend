@@ -1,52 +1,34 @@
-#app/api/v1/endpoints/students.py
+# app/api/v1/endpoints/students.py
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import uuid
+from typing import List
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel
-from typing import List, Optional
-import uuid
 
 from app.core.database import get_db
-from app.core.tenant import get_current_tenant
+from app.core.tenant import require_tenant_id
 from app.models.student import Student
+from app.schemas.student import StudentCreate, StudentResponse
 
 router = APIRouter()
-
-class StudentCreate(BaseModel):
-    admission_number: str
-    first_name: str
-    last_name: str
-    gender: str
-    class_arm_id: Optional[uuid.UUID] = None
-
-class StudentResponse(BaseModel):
-    id: uuid.UUID
-    admission_number: str
-    first_name: str
-    last_name: str
-    gender: str
-    is_active: bool
-
-    class Config:
-        from_attributes = True
 
 @router.post("/", response_model=StudentResponse, status_code=status.HTTP_201_CREATED)
 async def enroll_student(
     payload: StudentCreate,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    tenant_id = get_current_tenant()
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Tenant context missing.")
-
     student = Student(
         school_id=tenant_id,
         admission_number=payload.admission_number,
         first_name=payload.first_name,
         last_name=payload.last_name,
-        gender=payload.gender,
-        class_arm_id=payload.class_arm_id
+        middle_name=payload.middle_name,
+        class_arm_id=payload.class_arm_id,
+        photo_url=payload.photo_url,
+        parent_phone=payload.parent_phone,
+        parent_email=payload.parent_email
     )
     db.add(student)
     await db.commit()
@@ -57,12 +39,9 @@ async def enroll_student(
 async def list_students(
     skip: int = 0,
     limit: int = 100,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    tenant_id = get_current_tenant()
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Tenant context missing.")
-
     query = (
         select(Student)
         .where(Student.school_id == tenant_id)
