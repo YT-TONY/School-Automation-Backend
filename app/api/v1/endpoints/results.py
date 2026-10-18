@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
-from app.core.tenant import require_tenant_id
+from app.core.tenant import require_tenant_id, require_tier
 from app.models.academic import Subject
 from app.models.pin import ResultPin
 from app.models.result import Result, ResultStatus
@@ -26,8 +26,7 @@ from app.schemas.result import (
 
 router = APIRouter()
 
-# --- 1. Batch Score Ingestion with CA Breakdown ---
-
+# --- 1. Batch Score Ingestion ---
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
     entries: List[ResultEntry],
@@ -36,7 +35,6 @@ async def upload_results(
 ):
     db_objects = []
     for entry in entries:
-        # Auto-sum test1 + test2 + assignment if ca_score is not explicitly given
         ca_total = entry.ca_score if entry.ca_score is not None else (entry.test1_score + entry.test2_score + entry.assignment_score)
         total = ca_total + entry.exam_score
         grade = (
@@ -69,8 +67,7 @@ async def upload_results(
     return {"inserted": len(db_objects), "status": ResultStatus.DRAFT}
 
 
-# --- 2. Result Approval Workflow State Transition ---
-
+# --- 2. Result Approval Workflow ---
 @router.patch("/status", response_model=StatusUpdateResponse)
 async def update_result_status(
     payload: ResultStatusUpdate,
@@ -107,9 +104,8 @@ async def update_result_status(
     }
 
 
-# --- 3. Class Broadsheet Aggregation Matrix ---
-
-@router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse)
+# --- 3. Tier 2 Only: Class Broadsheet Matrix ---
+@router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse, dependencies=[Depends(require_tier(2))])
 async def get_class_broadsheet(
     class_arm_id: uuid.UUID,
     session: str,
@@ -117,7 +113,7 @@ async def get_class_broadsheet(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Compiles a matrix broadsheet of all students across all subjects in a class arm."""
+    """Tier 2 Feature: Compiles a side-by-side matrix broadsheet for a class arm."""
     students_q = select(Student).where(Student.school_id == tenant_id, Student.class_arm_id == class_arm_id)
     students_res = await db.execute(students_q)
     students = students_res.scalars().all()
@@ -163,7 +159,6 @@ async def get_class_broadsheet(
             "position": 0
         })
 
-    # Sort students by total aggregate score descending
     broadsheet_rows.sort(key=lambda x: x["total_aggregate"], reverse=True)
     for idx, row in enumerate(broadsheet_rows, start=1):
         row["position"] = idx
@@ -179,8 +174,7 @@ async def get_class_broadsheet(
     )
 
 
-# --- 4. Admin / Teacher PIN-Free Result Sheet Viewer ---
-
+# --- 4. Admin / Teacher Result Sheet Viewer ---
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
     student_id: uuid.UUID,
@@ -189,10 +183,7 @@ async def get_admin_student_results(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    student_q = select(Student).where(
-        Student.id == student_id,
-        Student.school_id == tenant_id
-    )
+    student_q = select(Student).where(Student.id == student_id, Student.school_id == tenant_id)
     student_res = await db.execute(student_q)
     student = student_res.scalars().first()
     if not student:
@@ -241,8 +232,7 @@ async def get_admin_student_results(
     )
 
 
-# --- 5. Public PIN-Protected Result Verification Engine ---
-
+# --- 5. Tier 1 Public Scratch PIN Verification Engine ---
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
     payload: CheckResultRequest,

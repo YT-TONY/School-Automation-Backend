@@ -2,7 +2,7 @@
 
 from app.schemas.school import SchoolConfigResponse
 from app.schemas.auth import TokenResponse, UserResponse
-from app.schemas.user import UserCreate, UserUpdate
+from app.schemas.user import UserCreate, UserUpdate, UserPermissionsUpdate
 from app.schemas.student import StudentCreate, StudentResponse
 from app.schemas.result import (
     ResultEntry,
@@ -11,6 +11,8 @@ from app.schemas.result import (
     CheckResultRequest,
     StudentResultSheet,
     ScoreDetail,
+    BroadsheetRow,
+    BroadsheetResponse,
 )
 from app.schemas.pin import PinGenerateRequest, PinGenerateResponse, PinResponse
 from app.schemas.academic import (
@@ -19,6 +21,13 @@ from app.schemas.academic import (
     SubjectCreate,
     SubjectResponse,
 )
+from app.schemas.fee import (
+    FeeItemCreate,
+    FeeItemResponse,
+    PackageSelectionRequest,
+    StudentInvoiceResponse,
+    FeeItemDetail,
+)
 
 __all__ = [
     "SchoolConfigResponse",
@@ -26,6 +35,7 @@ __all__ = [
     "UserResponse",
     "UserCreate",
     "UserUpdate",
+    "UserPermissionsUpdate",
     "StudentCreate",
     "StudentResponse",
     "ResultEntry",
@@ -34,6 +44,8 @@ __all__ = [
     "CheckResultRequest",
     "StudentResultSheet",
     "ScoreDetail",
+    "BroadsheetRow",
+    "BroadsheetResponse",
     "PinGenerateRequest",
     "PinGenerateResponse",
     "PinResponse",
@@ -41,4 +53,9 @@ __all__ = [
     "ClassArmResponse",
     "SubjectCreate",
     "SubjectResponse",
+    "FeeItemCreate",
+    "FeeItemResponse",
+    "PackageSelectionRequest",
+    "StudentInvoiceResponse",
+    "FeeItemDetail",
 ]

@@ -8,7 +8,7 @@ from sqlalchemy.future import select
 
 from app.core.database import get_db
 from app.core.security import require_roles, get_password_hash
-from app.core.tenant import require_tenant_id
+from app.core.tenant import require_tenant_id, require_tier
 from app.models.user import User, UserRole
 from app.schemas.user import UserCreate, UserResponse, UserUpdate, UserPermissionsUpdate
 
@@ -29,11 +29,7 @@ async def create_staff_user(
     current_admin: User = Depends(require_roles(ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db)
 ):
-    # Check if email is already registered in this tenant
-    existing_query = select(User).where(
-        User.school_id == tenant_id,
-        User.email == payload.email
-    )
+    existing_query = select(User).where(User.school_id == tenant_id, User.email == payload.email)
     existing_res = await db.execute(existing_query)
     if existing_res.scalars().first():
         raise HTTPException(
@@ -41,7 +37,6 @@ async def create_staff_user(
             detail=f"User with email '{payload.email}' already exists in this school."
         )
 
-    # Set default permission flags based on initial role
     is_exam_officer = payload.role == UserRole.EXAM_OFFICER
     is_class_teacher = payload.role == UserRole.FORM_TEACHER
     can_enroll = payload.role in [UserRole.SCHOOL_ADMIN, UserRole.VICE_PRINCIPAL_ADMIN]
@@ -64,7 +59,8 @@ async def create_staff_user(
     await db.refresh(user)
     return user
 
-@router.patch("/{user_id}/permissions", response_model=UserResponse)
+# --- Tier 2 Feature: Granular Permission Toggles ---
+@router.patch("/{user_id}/permissions", response_model=UserResponse, dependencies=[Depends(require_tier(2))])
 async def toggle_staff_permissions(
     user_id: uuid.UUID,
     payload: UserPermissionsUpdate,
@@ -72,7 +68,7 @@ async def toggle_staff_permissions(
     current_admin: User = Depends(require_roles([UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN])),
     db: AsyncSession = Depends(get_db)
 ):
-    """Allows School Admin to toggle special operational privileges for any staff member."""
+    """Tier 2 Feature: Toggles specific operational privileges for a staff member."""
     query = select(User).where(User.id == user_id, User.school_id == tenant_id)
     result = await db.execute(query)
     user = result.scalars().first()

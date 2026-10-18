@@ -7,6 +7,8 @@ from app.models.academic import ClassArm, Subject
 from app.models.student import Student, StudentStatus
 from app.models.result import Result, ResultStatus
 from app.models.pin import ResultPin
+from app.models.teacher_assignment import TeacherAssignment
+from app.models.fee import FeeItem, FeeType, StudentFeeSelection
 
 __all__ = [
     "Base",
@@ -20,4 +22,8 @@ __all__ = [
     "Result",
     "ResultStatus",
     "ResultPin",
+    "TeacherAssignment",
+    "FeeItem",
+    "FeeType",
+    "StudentFeeSelection",
 ]

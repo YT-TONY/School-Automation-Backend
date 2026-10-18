@@ -2,7 +2,7 @@
 
 import uuid
 from contextvars import ContextVar
-from typing import Optional
+from typing import Optional, Callable
 from fastapi import Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -78,3 +78,14 @@ async def get_current_school(
             detail="This school portal account is currently inactive."
         )
     return school
+
+def require_tier(min_tier: int) -> Callable:
+    """Dependency factory enforcing subscription tier requirements (e.g. Tier 2 only routes)."""
+    async def tier_dependency(school: School = Depends(get_current_school)) -> School:
+        if school.tier < min_tier:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This feature requires a Tier {min_tier} subscription. Your school is currently on Tier {school.tier}."
+            )
+        return school
+    return tier_dependency

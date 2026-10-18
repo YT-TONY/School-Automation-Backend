@@ -1,5 +1,6 @@
 # app/api/v1/endpoints/admin_schools.py
 
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -80,3 +81,25 @@ async def register_new_school_tenant(
         admin_email=admin_user.email,
         created_at=new_school.created_at
     )
+
+# --- Super Admin Tenant Tier Management ---
+@router.patch("/{school_id}/tier", status_code=status.HTTP_200_OK)
+async def update_school_tier(
+    school_id: uuid.UUID,
+    tier: int,
+    current_user: User = Depends(require_roles(SUPER_ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db)
+):
+    if tier not in [1, 2]:
+        raise HTTPException(status_code=400, detail="Invalid tier level. Must be 1 or 2.")
+
+    query = select(School).where(School.id == school_id)
+    res = await db.execute(query)
+    school = res.scalars().first()
+
+    if not school:
+        raise HTTPException(status_code=404, detail="School tenant not found.")
+
+    school.tier = tier
+    await db.commit()
+    return {"school_id": str(school.id), "school_name": school.name, "updated_tier": school.tier}
