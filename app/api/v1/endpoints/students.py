@@ -21,15 +21,16 @@ router = APIRouter()
 ADMIN_OR_TEACHER_ROLES = [
     UserRole.SCHOOL_ADMIN,
     UserRole.PRINCIPAL,
-    UserRole.VICE_PRINCIPAL,
+    UserRole.VICE_PRINCIPAL_ACADEMIC,
+    UserRole.VICE_PRINCIPAL_ADMIN,
     UserRole.TEACHER,
-    UserRole.CLASS_TEACHER,
+    UserRole.FORM_TEACHER,
     UserRole.SUPER_ADMIN
 ]
 
 async def _generate_unique_admission_number(last_name: str, school_id: uuid.UUID, db: AsyncSession) -> str:
     clean_surname = re.sub(r'[^A-Za-z]', '', last_name).upper() or "STUDENT"
-    for _ in range(10):  # Retry collision loop
+    for _ in range(10):
         digits = ''.join(secrets.choice(string.digits) for _ in range(6))
         candidate = f"{clean_surname}{digits}"
         query = select(Student).where(Student.school_id == school_id, Student.admission_number == candidate)
@@ -45,10 +46,8 @@ async def enroll_student(
     current_user: User = Depends(require_roles(ADMIN_OR_TEACHER_ROLES)),
     db: AsyncSession = Depends(get_db)
 ):
-    # 1. Resolve or Auto-Generate Admission Number
     if payload.admission_number and payload.admission_number.strip():
         admission_num = payload.admission_number.strip().upper()
-        # Verify no collision
         query = select(Student).where(Student.school_id == tenant_id, Student.admission_number == admission_num)
         res = await db.execute(query)
         if res.scalars().first():
@@ -59,7 +58,6 @@ async def enroll_student(
     else:
         admission_num = await _generate_unique_admission_number(payload.last_name, tenant_id, db)
 
-    # 2. Instantiate Student Model
     student = Student(
         school_id=tenant_id,
         admission_number=admission_num,
@@ -73,7 +71,6 @@ async def enroll_student(
     )
     db.add(student)
 
-    # 3. Seed User account for student if student_email provided
     temp_password = None
     if payload.student_email:
         temp_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))

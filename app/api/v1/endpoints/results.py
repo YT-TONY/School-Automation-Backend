@@ -20,11 +20,13 @@ from app.schemas.result import (
     ScoreDetail,
     StatusUpdateResponse,
     StudentResultSheet,
+    BroadsheetResponse,
+    BroadsheetRow,
 )
 
 router = APIRouter()
 
-# --- 1. Batch Score Ingestion ---
+# --- 1. Batch Score Ingestion with CA Breakdown ---
 
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
@@ -34,7 +36,9 @@ async def upload_results(
 ):
     db_objects = []
     for entry in entries:
-        total = entry.ca_score + entry.exam_score
+        # Auto-sum test1 + test2 + assignment if ca_score is not explicitly given
+        ca_total = entry.ca_score if entry.ca_score is not None else (entry.test1_score + entry.test2_score + entry.assignment_score)
+        total = ca_total + entry.exam_score
         grade = (
             "A" if total >= 70
             else "B" if total >= 60
@@ -49,7 +53,10 @@ async def upload_results(
             subject_id=entry.subject_id,
             session=entry.session,
             term=entry.term,
-            ca_score=entry.ca_score,
+            test1_score=entry.test1_score,
+            test2_score=entry.test2_score,
+            assignment_score=entry.assignment_score,
+            ca_score=ca_total,
             exam_score=entry.exam_score,
             total_score=total,
             grade=grade,
@@ -100,7 +107,79 @@ async def update_result_status(
     }
 
 
-# --- 3. Admin / Teacher PIN-Free Result Sheet Viewer ---
+# --- 3. Class Broadsheet Aggregation Matrix ---
+
+@router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse)
+async def get_class_broadsheet(
+    class_arm_id: uuid.UUID,
+    session: str,
+    term: str,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Compiles a matrix broadsheet of all students across all subjects in a class arm."""
+    students_q = select(Student).where(Student.school_id == tenant_id, Student.class_arm_id == class_arm_id)
+    students_res = await db.execute(students_q)
+    students = students_res.scalars().all()
+    if not students:
+        raise HTTPException(status_code=404, detail="No students found in this class arm.")
+
+    student_map = {s.id: s for s in students}
+    student_ids = list(student_map.keys())
+
+    results_q = (
+        select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
+        .join(Subject, Result.subject_id == Subject.id)
+        .where(
+            Result.school_id == tenant_id,
+            Result.session == session,
+            Result.term == term,
+            Result.student_id.in_(student_ids)
+        )
+    )
+    results_res = await db.execute(results_q)
+    rows = results_res.all()
+
+    subject_dict = {}
+    student_scores = {s_id: {} for s_id in student_ids}
+
+    for r in rows:
+        subj_code = r.subject_code or str(r.Result.subject_id)
+        subject_dict[subj_code] = r.subject_name
+        student_scores[r.Result.student_id][subj_code] = r.Result.total_score
+
+    broadsheet_rows = []
+    for s_id, scores in student_scores.items():
+        st = student_map[s_id]
+        agg = sum(scores.values())
+        avg = (agg / len(scores)) if scores else 0.0
+        broadsheet_rows.append({
+            "student_id": st.id,
+            "student_name": st.full_name,
+            "admission_number": st.admission_number,
+            "subject_scores": scores,
+            "total_aggregate": agg,
+            "average_score": avg,
+            "position": 0
+        })
+
+    # Sort students by total aggregate score descending
+    broadsheet_rows.sort(key=lambda x: x["total_aggregate"], reverse=True)
+    for idx, row in enumerate(broadsheet_rows, start=1):
+        row["position"] = idx
+
+    subjects_list = [{"code": k, "name": v} for k, v in subject_dict.items()]
+
+    return BroadsheetResponse(
+        class_arm_id=class_arm_id,
+        session=session,
+        term=term,
+        subjects=subjects_list,
+        rows=[BroadsheetRow(**r) for r in broadsheet_rows]
+    )
+
+
+# --- 4. Admin / Teacher PIN-Free Result Sheet Viewer ---
 
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
@@ -137,6 +216,9 @@ async def get_admin_student_results(
             subject_id=r.Result.subject_id,
             subject_name=r.subject_name,
             subject_code=r.subject_code,
+            test1_score=r.Result.test1_score,
+            test2_score=r.Result.test2_score,
+            assignment_score=r.Result.assignment_score,
             ca_score=r.Result.ca_score,
             exam_score=r.Result.exam_score,
             total_score=r.Result.total_score,
@@ -145,6 +227,8 @@ async def get_admin_student_results(
         ) for r in rows
     ]
 
+    term_avg = (sum(s.total_score for s in scores) / len(scores)) if scores else 0.0
+
     return StudentResultSheet(
         student_id=student.id,
         student_name=student.full_name,
@@ -152,11 +236,12 @@ async def get_admin_student_results(
         session=session,
         term=term,
         pin_remaining_uses=None,
+        term_average=round(term_avg, 2),
         results=scores
     )
 
 
-# --- 4. Public PIN-Protected Result Verification Engine ---
+# --- 5. Public PIN-Protected Result Verification Engine ---
 
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
@@ -164,7 +249,6 @@ async def verify_pin_and_get_results(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    # 1. Verify Student
     student_q = select(Student).where(
         Student.admission_number == payload.admission_number,
         Student.school_id == tenant_id
@@ -174,7 +258,6 @@ async def verify_pin_and_get_results(
     if not student:
         raise HTTPException(status_code=404, detail="Student admission record not found.")
 
-    # 2. Verify Scratch PIN
     pin_q = select(ResultPin).where(
         ResultPin.pin_code == payload.pin_code,
         ResultPin.school_id == tenant_id,
@@ -188,7 +271,6 @@ async def verify_pin_and_get_results(
     if pin.times_used >= pin.max_uses:
         raise HTTPException(status_code=400, detail="Scratch PIN usage limit exceeded.")
 
-    # 3. Query ONLY PUBLISHED Results
     results_q = (
         select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
         .join(Subject, Result.subject_id == Subject.id)
@@ -209,22 +291,37 @@ async def verify_pin_and_get_results(
             detail="No published results available for this term/session yet. Contact your school administration."
         )
 
-    # 4. Deduct/Increment PIN Usage only when published results exist
     pin.times_used += 1
     await db.commit()
 
-    scores = [
-        ScoreDetail(
+    scores = []
+    strongest_subject, weakest_subject = None, None
+    max_score, min_score = -1.0, 101.0
+
+    for r in rows:
+        tot = r.Result.total_score
+        if tot > max_score:
+            max_score = tot
+            strongest_subject = r.subject_name
+        if tot < min_score:
+            min_score = tot
+            weakest_subject = r.subject_name
+
+        scores.append(ScoreDetail(
             subject_id=r.Result.subject_id,
             subject_name=r.subject_name,
             subject_code=r.subject_code,
+            test1_score=r.Result.test1_score,
+            test2_score=r.Result.test2_score,
+            assignment_score=r.Result.assignment_score,
             ca_score=r.Result.ca_score,
             exam_score=r.Result.exam_score,
             total_score=r.Result.total_score,
             grade=r.Result.grade,
             status=r.Result.status
-        ) for r in rows
-    ]
+        ))
+
+    term_avg = (sum(s.total_score for s in scores) / len(scores)) if scores else 0.0
 
     return StudentResultSheet(
         student_id=student.id,
@@ -233,5 +330,9 @@ async def verify_pin_and_get_results(
         session=payload.session,
         term=payload.term,
         pin_remaining_uses=pin.max_uses - pin.times_used,
+        class_position="Verified",
+        term_average=round(term_avg, 2),
+        strongest_subject=strongest_subject,
+        weakest_subject=weakest_subject,
         results=scores
     )

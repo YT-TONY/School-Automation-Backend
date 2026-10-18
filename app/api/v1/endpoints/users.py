@@ -10,11 +10,17 @@ from app.core.database import get_db
 from app.core.security import require_roles, get_password_hash
 from app.core.tenant import require_tenant_id
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserResponse, UserUpdate
+from app.schemas.user import UserCreate, UserResponse, UserUpdate, UserPermissionsUpdate
 
 router = APIRouter()
 
-ADMIN_ROLES = [UserRole.SCHOOL_ADMIN, UserRole.PRINCIPAL, UserRole.SUPER_ADMIN]
+ADMIN_ROLES = [
+    UserRole.SCHOOL_ADMIN,
+    UserRole.PRINCIPAL,
+    UserRole.VICE_PRINCIPAL_ACADEMIC,
+    UserRole.VICE_PRINCIPAL_ADMIN,
+    UserRole.SUPER_ADMIN
+]
 
 @router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_staff_user(
@@ -35,6 +41,11 @@ async def create_staff_user(
             detail=f"User with email '{payload.email}' already exists in this school."
         )
 
+    # Set default permission flags based on initial role
+    is_exam_officer = payload.role == UserRole.EXAM_OFFICER
+    is_class_teacher = payload.role == UserRole.FORM_TEACHER
+    can_enroll = payload.role in [UserRole.SCHOOL_ADMIN, UserRole.VICE_PRINCIPAL_ADMIN]
+
     user = User(
         school_id=tenant_id,
         email=payload.email,
@@ -42,10 +53,44 @@ async def create_staff_user(
         full_name=payload.full_name,
         phone_number=payload.phone_number,
         role=payload.role,
-        is_active=True
+        is_active=True,
+        is_exam_officer=is_exam_officer,
+        is_class_teacher=is_class_teacher,
+        can_enroll_students=can_enroll
     )
 
     db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+@router.patch("/{user_id}/permissions", response_model=UserResponse)
+async def toggle_staff_permissions(
+    user_id: uuid.UUID,
+    payload: UserPermissionsUpdate,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_admin: User = Depends(require_roles([UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN])),
+    db: AsyncSession = Depends(get_db)
+):
+    """Allows School Admin to toggle special operational privileges for any staff member."""
+    query = select(User).where(User.id == user_id, User.school_id == tenant_id)
+    result = await db.execute(query)
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Staff user record not found.")
+
+    if payload.is_exam_officer is not None:
+        user.is_exam_officer = payload.is_exam_officer
+    if payload.is_class_teacher is not None:
+        user.is_class_teacher = payload.is_class_teacher
+    if payload.can_enroll_students is not None:
+        user.can_enroll_students = payload.can_enroll_students
+    if payload.can_manage_fees is not None:
+        user.can_manage_fees = payload.can_manage_fees
+    if payload.can_approve_results is not None:
+        user.can_approve_results = payload.can_approve_results
+
     await db.commit()
     await db.refresh(user)
     return user

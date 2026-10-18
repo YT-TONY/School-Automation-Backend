@@ -1,21 +1,27 @@
-#app/models/user.py
+# app/models/user.py
 
+from __future__ import annotations
 import uuid
 import enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from sqlalchemy import String, Boolean, DateTime, Enum, ForeignKey, func, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
-from app.models.school import School
+
+if TYPE_CHECKING:
+    from app.models.school import School
 
 class UserRole(str, enum.Enum):
     SUPER_ADMIN = "SUPER_ADMIN"
     SCHOOL_ADMIN = "SCHOOL_ADMIN"
     PRINCIPAL = "PRINCIPAL"
-    VICE_PRINCIPAL = "VICE_PRINCIPAL"
+    VICE_PRINCIPAL_ACADEMIC = "VICE_PRINCIPAL_ACADEMIC"
+    VICE_PRINCIPAL_ADMIN = "VICE_PRINCIPAL_ADMIN"
+    EXAM_OFFICER = "EXAM_OFFICER"
     TEACHER = "TEACHER"
-    CLASS_TEACHER = "CLASS_TEACHER"
+    FORM_TEACHER = "FORM_TEACHER"
+    BURSAR = "BURSAR"
     STUDENT = "STUDENT"
     PARENT = "PARENT"
 
@@ -25,8 +31,6 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    
-    # Multi-tenant Isolation Key (Nullable only for platform Super Admins)[cite: 1]
     school_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("schools.id", ondelete="CASCADE"),
@@ -44,6 +48,13 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Dynamic Admin Toggleable Permission Flags
+    is_exam_officer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_class_teacher: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    can_enroll_students: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    can_manage_fees: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    can_approve_results: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -51,7 +62,6 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    # Relationships
     school: Mapped[Optional["School"]] = relationship("School", back_populates="users")
 
     __table_args__ = (

@@ -1,6 +1,5 @@
 # app/api/v1/endpoints/admin_schools.py
 
-from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -15,13 +14,13 @@ router = APIRouter()
 
 SUPER_ADMIN_ROLE = [UserRole.SUPER_ADMIN]
 
-@router.post("/", response_model=SchoolOnboardResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=SchoolOnboardResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=SchoolOnboardResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 async def register_new_school_tenant(
     payload: SchoolOnboardCreate,
     current_user: User = Depends(require_roles(SUPER_ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db)
 ):
-    # 1. Check for slug/subdomain/custom_domain uniqueness
     slug_q = select(School).where(
         (School.slug == payload.slug) |
         (School.subdomain == payload.subdomain) |
@@ -34,7 +33,6 @@ async def register_new_school_tenant(
             detail="A school with this slug, subdomain, or custom domain already exists."
         )
 
-    # 2. Create School Instance
     new_school = School(
         name=payload.name,
         slug=payload.slug.lower(),
@@ -55,9 +53,8 @@ async def register_new_school_tenant(
         }
     )
     db.add(new_school)
-    await db.flush()  # Populates new_school.id
+    await db.flush()
 
-    # 3. Create Primary SCHOOL_ADMIN User
     admin_user = User(
         school_id=new_school.id,
         email=payload.admin_email,

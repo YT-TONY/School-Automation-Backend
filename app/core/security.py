@@ -63,14 +63,22 @@ async def get_current_user(
         raise credentials_exception
 
     query = select(User).where(User.id == user_id)
-    if tenant_id:
-        query = query.where(User.school_id == tenant_id)
-
     result = await db.execute(query)
     user = result.scalars().first()
 
     if not user or not user.is_active:
         raise credentials_exception
+
+    # Super Admins operate globally across all tenants
+    if user.role == UserRole.SUPER_ADMIN:
+        return user
+
+    # Ensure school staff/students match the active tenant header if present
+    if tenant_id and user.school_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not belong to the requested school tenant."
+        )
 
     return user
 

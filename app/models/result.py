@@ -1,4 +1,4 @@
-#app/models/result.py
+# app/models/result.py
 
 from __future__ import annotations
 import uuid
@@ -15,8 +15,9 @@ if TYPE_CHECKING:
 
 class ResultStatus(str, enum.Enum):
     DRAFT = "DRAFT"
-    SUBMITTED = "SUBMITTED"
-    APPROVED = "APPROVED"
+    SUBMITTED_BY_TEACHER = "SUBMITTED_BY_TEACHER"
+    COMPILED_BY_CLASS_TEACHER = "COMPILED_BY_CLASS_TEACHER"
+    APPROVED_BY_VP = "APPROVED_BY_VP"
     PUBLISHED = "PUBLISHED"
 
 class Result(Base):
@@ -27,15 +28,20 @@ class Result(Base):
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
     subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
 
-    session: Mapped[str] = mapped_column(String(20), nullable=False)  # e.g., "2025/2026"
-    term: Mapped[str] = mapped_column(String(20), nullable=False)     # e.g., "First Term"
+    session: Mapped[str] = mapped_column(String(20), nullable=False)
+    term: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    ca_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)   # Continuous Assessment
-    exam_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False) # Exam Score
-    total_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)# Calculated Total
+    # Granular Continuous Assessment Breakdown
+    test1_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    test2_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    assignment_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    
+    ca_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)     # Cumulative CA
+    exam_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)   # Exam Score
+    total_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # Final Total Score
 
-    grade: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)        # A, B, C, etc.
-    grade_point: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # 5.0, 4.0, etc.
+    grade: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    grade_point: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     teacher_remark: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     status: Mapped[ResultStatus] = mapped_column(Enum(ResultStatus, name="result_status_enum"), default=ResultStatus.DRAFT, nullable=False)
@@ -43,7 +49,6 @@ class Result(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # Relationships
     student: Mapped[Student] = relationship("Student", back_populates="results")
     subject: Mapped[Subject] = relationship("Subject")
 
