@@ -2,7 +2,7 @@
 
 import uuid
 from typing import List, Optional, Dict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.models.result import ResultStatus
 
 class ResultEntry(BaseModel):
@@ -10,11 +10,11 @@ class ResultEntry(BaseModel):
     subject_id: uuid.UUID
     session: str
     term: str
-    test1_score: float = 0.0
-    test2_score: float = 0.0
-    assignment_score: float = 0.0
-    ca_score: Optional[float] = None  # Auto-calculated from test1 + test2 + assignment if omitted
-    exam_score: float = 0.0
+    test1_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    test2_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    assignment_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    ca_score: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    exam_score: float = Field(default=0.0, ge=0.0, le=100.0)
 
 class ResultStatusUpdate(BaseModel):
     session: str
@@ -64,7 +64,7 @@ class BroadsheetRow(BaseModel):
     student_id: uuid.UUID
     student_name: str
     admission_number: str
-    subject_scores: Dict[str, float]               # Maps subject code or ID to total score
+    subject_scores: Dict[str, float]
     total_aggregate: float
     average_score: float
     position: int
@@ -73,5 +73,5 @@ class BroadsheetResponse(BaseModel):
     class_arm_id: uuid.UUID
     session: str
     term: str
-    subjects: List[Dict[str, str]]                 # [{"code": "MTH", "name": "Mathematics"}]
+    subjects: List[Dict[str, str]]
     rows: List[BroadsheetRow]

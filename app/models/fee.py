@@ -10,7 +10,7 @@ from app.core.database import Base
 
 class FeeType(str, enum.Enum):
     MANDATORY = "MANDATORY"      # Tuition, Development Fee
-    OPTIONAL = "OPTIONAL"        # Bus Transport, After-School Lessons, Boarding
+    OPTIONAL = "OPTIONAL"        # Bus Transport, After-School Lessons
     CONDITIONAL = "CONDITIONAL"  # WAEC/NECO (SS3), BECE (JSS3), Common Entrance (Primary 5)
 
 class FeeItem(Base):
@@ -26,8 +26,8 @@ class FeeItem(Base):
     session: Mapped[str] = mapped_column(String(20), nullable=False)
     term: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    # List of class level names this fee targets e.g. ["SS3"] or ["JSS3", "SS3"]
     applicable_classes: Mapped[Optional[List[str]]] = mapped_column(JSONB, nullable=True)
+    is_new_student_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

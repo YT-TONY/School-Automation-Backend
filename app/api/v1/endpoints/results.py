@@ -1,18 +1,23 @@
 # app/api/v1/endpoints/results.py
 
+import csv
+import io
 import uuid
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
+from app.core.security import require_roles
 from app.core.tenant import require_tenant_id, require_tier
 from app.models.academic import Subject
 from app.models.pin import ResultPin
 from app.models.result import Result, ResultStatus
 from app.models.student import Student
+from app.models.teacher_assignment import TeacherAssignment
+from app.models.user import User, UserRole
 from app.schemas.result import (
     CheckResultRequest,
     ResultEntry,
@@ -26,13 +31,40 @@ from app.schemas.result import (
 
 router = APIRouter()
 
-# --- 1. Batch Score Ingestion ---
+async def _verify_teacher_assignment(
+    user: User,
+    subject_id: uuid.UUID,
+    class_arm_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    db: AsyncSession
+):
+    if user.role in [UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN, UserRole.PRINCIPAL] or user.is_exam_officer:
+        return True
+
+    q = select(TeacherAssignment).where(
+        TeacherAssignment.school_id == tenant_id,
+        TeacherAssignment.teacher_id == user.id,
+        TeacherAssignment.subject_id == subject_id,
+        TeacherAssignment.class_arm_id == class_arm_id
+    )
+    res = await db.execute(q)
+    if not res.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to upload scores for this subject and class arm."
+        )
+
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
     entries: List[ResultEntry],
+    class_arm_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(require_roles([UserRole.TEACHER, UserRole.FORM_TEACHER, UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN])),
     db: AsyncSession = Depends(get_db)
 ):
+    if entries:
+        await _verify_teacher_assignment(current_user, entries[0].subject_id, class_arm_id, tenant_id, db)
+
     db_objects = []
     for entry in entries:
         ca_total = entry.ca_score if entry.ca_score is not None else (entry.test1_score + entry.test2_score + entry.assignment_score)
@@ -66,8 +98,68 @@ async def upload_results(
     await db.commit()
     return {"inserted": len(db_objects), "status": ResultStatus.DRAFT}
 
+@router.post("/upload-file", status_code=status.HTTP_201_CREATED)
+async def upload_results_csv(
+    file: UploadFile = File(...),
+    subject_id: uuid.UUID = Form(...),
+    class_arm_id: uuid.UUID = Form(...),
+    session: str = Form(...),
+    term: str = Form(...),
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(require_roles([UserRole.TEACHER, UserRole.FORM_TEACHER, UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN])),
+    db: AsyncSession = Depends(get_db)
+):
+    await _verify_teacher_assignment(current_user, subject_id, class_arm_id, tenant_id, db)
 
-# --- 2. Result Approval Workflow ---
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are supported.")
+
+    content = await file.read()
+    buffer = io.StringIO(content.decode("utf-8"))
+    reader = csv.DictReader(buffer)
+
+    db_objects = []
+    for row in reader:
+        adm_no = row.get("admission_number", "").strip().upper()
+        if not adm_no:
+            continue
+
+        student_q = select(Student).where(Student.admission_number == adm_no, Student.school_id == tenant_id)
+        student_res = await db.execute(student_q)
+        student = student_res.scalars().first()
+        if not student:
+            continue
+
+        t1 = float(row.get("test1", 0.0))
+        t2 = float(row.get("test2", 0.0))
+        assign = float(row.get("assignment", 0.0))
+        exam = float(row.get("exam", 0.0))
+        ca_tot = t1 + t2 + assign
+        total = ca_tot + exam
+
+        grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
+
+        res = Result(
+            school_id=tenant_id,
+            student_id=student.id,
+            subject_id=subject_id,
+            session=session,
+            term=term,
+            test1_score=t1,
+            test2_score=t2,
+            assignment_score=assign,
+            ca_score=ca_tot,
+            exam_score=exam,
+            total_score=total,
+            grade=grade,
+            status=ResultStatus.DRAFT
+        )
+        db_objects.append(res)
+
+    db.add_all(db_objects)
+    await db.commit()
+    return {"parsed_and_inserted": len(db_objects), "filename": file.filename}
+
 @router.patch("/status", response_model=StatusUpdateResponse)
 async def update_result_status(
     payload: ResultStatusUpdate,
@@ -103,8 +195,6 @@ async def update_result_status(
         "message": f"Successfully transitioned {res.rowcount} result entries to {payload.target_status.value}."
     }
 
-
-# --- 3. Tier 2 Only: Class Broadsheet Matrix ---
 @router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse, dependencies=[Depends(require_tier(2))])
 async def get_class_broadsheet(
     class_arm_id: uuid.UUID,
@@ -113,7 +203,6 @@ async def get_class_broadsheet(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Tier 2 Feature: Compiles a side-by-side matrix broadsheet for a class arm."""
     students_q = select(Student).where(Student.school_id == tenant_id, Student.class_arm_id == class_arm_id)
     students_res = await db.execute(students_q)
     students = students_res.scalars().all()
@@ -173,8 +262,6 @@ async def get_class_broadsheet(
         rows=[BroadsheetRow(**r) for r in broadsheet_rows]
     )
 
-
-# --- 4. Admin / Teacher Result Sheet Viewer ---
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
     student_id: uuid.UUID,
@@ -231,8 +318,6 @@ async def get_admin_student_results(
         results=scores
     )
 
-
-# --- 5. Tier 1 Public Scratch PIN Verification Engine ---
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
     payload: CheckResultRequest,

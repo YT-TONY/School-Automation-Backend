@@ -1,15 +1,21 @@
-#app/models/school.py
+# app/models/school.py
 
 from __future__ import annotations
 import uuid
+import enum
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
-from sqlalchemy import String, Integer, Boolean, DateTime, func
+from sqlalchemy import String, Integer, Boolean, DateTime, Enum, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 if TYPE_CHECKING:
     from app.models.user import User
+
+class SchoolType(str, enum.Enum):
+    DAY = "DAY"
+    BOARDING = "BOARDING"
+    MIXED = "MIXED"
 
 class School(Base):
     __tablename__ = "schools"
@@ -21,6 +27,11 @@ class School(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     subdomain: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True, index=True)
     custom_domain: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
+
+    # School Classification Type
+    school_type: Mapped[SchoolType] = mapped_column(
+        Enum(SchoolType, name="school_type_enum"), default=SchoolType.MIXED, nullable=False
+    )
 
     # Tier Control (1 = Starter, 2 = Complete OS)
     tier: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -49,6 +60,7 @@ class School(Base):
             "enable_whatsapp_bot": False,
             "allow_parent_pin_purchase": True,
             "pass_mark_threshold": 50,
+            "minimum_payment_percentage": 50,
             "current_session": "2025/2026",
             "current_term": "First Term"
         }

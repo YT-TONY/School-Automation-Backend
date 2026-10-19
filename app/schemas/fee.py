@@ -11,7 +11,8 @@ class FeeItemCreate(BaseModel):
     fee_type: FeeType = FeeType.MANDATORY
     session: str
     term: str
-    applicable_classes: Optional[List[str]] = None  # None applies globally to all students
+    applicable_classes: Optional[List[str]] = None
+    is_new_student_only: bool = False
 
 class FeeItemResponse(BaseModel):
     id: uuid.UUID
@@ -22,6 +23,7 @@ class FeeItemResponse(BaseModel):
     session: str
     term: str
     applicable_classes: Optional[List[str]] = None
+    is_new_student_only: bool
     is_active: bool
 
     class Config:
@@ -44,6 +46,9 @@ class StudentInvoiceResponse(BaseModel):
     admission_number: str
     session: str
     term: str
+    minimum_payment_percentage_required: int
+    boarding_fee: float = 0.0
     mandatory_items: List[FeeItemDetail]
     optional_items: List[FeeItemDetail]
+    new_student_packages: List[FeeItemDetail]
     total_amount_due: float

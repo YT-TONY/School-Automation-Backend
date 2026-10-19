@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
-from app.core.tenant import require_tenant_id, require_tier
+from app.core.tenant import require_tenant_id, require_tier, get_current_school
 from app.core.security import require_roles
 from app.models.fee import FeeItem, FeeType, StudentFeeSelection
+from app.models.hostel import BedAllocation, HostelRoom, ReservationStatus
+from app.models.school import School, SchoolType
 from app.models.student import Student
 from app.models.user import User, UserRole
 from app.schemas.fee import (
@@ -22,7 +24,6 @@ from app.schemas.fee import (
 
 router = APIRouter()
 
-# Restricted to Tier 2 Tenants
 ADMIN_OR_BURSAR = [UserRole.SCHOOL_ADMIN, UserRole.BURSAR, UserRole.SUPER_ADMIN]
 
 @router.post("/items", response_model=FeeItemResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_tier(2))])
@@ -39,7 +40,8 @@ async def create_fee_item(
         fee_type=payload.fee_type,
         session=payload.session,
         term=payload.term,
-        applicable_classes=payload.applicable_classes
+        applicable_classes=payload.applicable_classes,
+        is_new_student_only=payload.is_new_student_only
     )
     db.add(item)
     await db.commit()
@@ -68,8 +70,6 @@ async def save_student_package_selection(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Allows parents or admins to toggle optional/conditional fee selections for a student."""
-    # Delete previous optional selections for clean state
     clear_stmt = select(StudentFeeSelection).where(
         StudentFeeSelection.school_id == tenant_id,
         StudentFeeSelection.student_id == payload.student_id
@@ -97,16 +97,15 @@ async def generate_student_invoice(
     session: str,
     term: str,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
+    school: School = Depends(get_current_school),
     db: AsyncSession = Depends(get_db)
 ):
-    """Dynamically calculates custom invoice based on mandatory fees + parent selected optional fees."""
     student_q = select(Student).where(Student.id == student_id, Student.school_id == tenant_id)
     student_res = await db.execute(student_q)
     student = student_res.scalars().first()
     if not student:
         raise HTTPException(status_code=404, detail="Student record not found.")
 
-    # 1. Fetch active fee items for term
     items_q = select(FeeItem).where(
         FeeItem.school_id == tenant_id,
         FeeItem.session == session,
@@ -116,7 +115,6 @@ async def generate_student_invoice(
     items_res = await db.execute(items_q)
     all_items = items_res.scalars().all()
 
-    # 2. Fetch student's optional selections
     selections_q = select(StudentFeeSelection.fee_item_id).where(
         StudentFeeSelection.school_id == tenant_id,
         StudentFeeSelection.student_id == student_id,
@@ -125,8 +123,26 @@ async def generate_student_invoice(
     sel_res = await db.execute(selections_q)
     selected_ids = set(sel_res.scalars().all())
 
-    mandatory_list, optional_list = [], []
-    total_due = 0.0
+    boarding_fee = 0.0
+    if school.school_type in [SchoolType.BOARDING, SchoolType.MIXED]:
+        bed_q = select(BedAllocation).where(
+            BedAllocation.school_id == tenant_id,
+            BedAllocation.student_id == student_id,
+            BedAllocation.session == session,
+            BedAllocation.term == term,
+            BedAllocation.status != ReservationStatus.VACATED
+        )
+        bed_res = await db.execute(bed_q)
+        bed_alloc = bed_res.scalars().first()
+        if bed_alloc:
+            room_q = select(HostelRoom).where(HostelRoom.id == bed_alloc.room_id)
+            room_res = await db.execute(room_q)
+            room = room_res.scalars().first()
+            if room:
+                boarding_fee = room.termly_fee
+
+    mandatory_list, optional_list, new_student_list = [], [], []
+    total_due = boarding_fee
 
     for item in all_items:
         detail = FeeItemDetail(
@@ -137,7 +153,10 @@ async def generate_student_invoice(
             is_selected=(item.id in selected_ids) if item.fee_type != FeeType.MANDATORY else True
         )
 
-        if item.fee_type == FeeType.MANDATORY:
+        if item.is_new_student_only:
+            new_student_list.append(detail)
+            total_due += item.amount
+        elif item.fee_type == FeeType.MANDATORY:
             mandatory_list.append(detail)
             total_due += item.amount
         else:
@@ -145,13 +164,18 @@ async def generate_student_invoice(
             if item.id in selected_ids:
                 total_due += item.amount
 
+    min_pct = school.settings.get("minimum_payment_percentage", 50)
+
     return StudentInvoiceResponse(
         student_id=student.id,
         student_name=student.full_name,
         admission_number=student.admission_number,
         session=session,
         term=term,
+        minimum_payment_percentage_required=min_pct,
+        boarding_fee=boarding_fee,
         mandatory_items=mandatory_list,
         optional_items=optional_list,
+        new_student_packages=new_student_list,
         total_amount_due=round(total_due, 2)
     )
