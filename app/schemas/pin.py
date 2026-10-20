@@ -1,7 +1,8 @@
-#app/schemas/pin.py
+# app/schemas/pin.py
 
 import uuid
-from pydantic import BaseModel
+from typing import Optional
+from pydantic import BaseModel, EmailStr
 
 class PinGenerateRequest(BaseModel):
     quantity: int = 50
@@ -23,3 +24,17 @@ class PinResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class OnlinePinPurchaseRequest(BaseModel):
+    quantity: int = 1
+    payer_email: EmailStr
+    payer_phone: Optional[str] = None
+
+class OnlinePinPurchaseResponse(BaseModel):
+    school_name: str
+    quantity: int
+    unit_price: float
+    total_amount: float
+    payer_email: str
+    payment_reference: str
+    checkout_url: str

@@ -5,15 +5,18 @@ import io
 import uuid
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+import openpyxl
 
 from app.core.database import get_db
 from app.core.security import require_roles
 from app.core.tenant import require_tenant_id, require_tier
-from app.models.academic import Subject
+from app.models.academic import Subject, ClassArm
 from app.models.pin import ResultPin
+from app.models.remark import TerminalRemark
 from app.models.result import Result, ResultStatus
 from app.models.student import Student
 from app.models.teacher_assignment import TeacherAssignment
@@ -27,10 +30,13 @@ from app.schemas.result import (
     StudentResultSheet,
     BroadsheetResponse,
     BroadsheetRow,
+    RemarkUpdatePayload,
+    RemarkResponse,
 )
 
 router = APIRouter()
 
+# --- Helper: Verify Teacher Allocation Guard ---
 async def _verify_teacher_assignment(
     user: User,
     subject_id: uuid.UUID,
@@ -54,6 +60,7 @@ async def _verify_teacher_assignment(
             detail="You are not authorized to upload scores for this subject and class arm."
         )
 
+# --- 1. Batch Score Ingestion ---
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
     entries: List[ResultEntry],
@@ -98,6 +105,7 @@ async def upload_results(
     await db.commit()
     return {"inserted": len(db_objects), "status": ResultStatus.DRAFT}
 
+# --- 2. CSV File Ingestion Endpoint ---
 @router.post("/upload-file", status_code=status.HTTP_201_CREATED)
 async def upload_results_csv(
     file: UploadFile = File(...),
@@ -160,6 +168,53 @@ async def upload_results_csv(
     await db.commit()
     return {"parsed_and_inserted": len(db_objects), "filename": file.filename}
 
+# --- 3. Form Teacher & Principal Terminal Remarks Endpoint ---
+@router.patch("/remarks", response_model=RemarkResponse, dependencies=[Depends(require_tier(2))])
+async def update_terminal_remarks(
+    payload: RemarkUpdatePayload,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(require_roles([UserRole.FORM_TEACHER, UserRole.SCHOOL_ADMIN, UserRole.PRINCIPAL, UserRole.SUPER_ADMIN])),
+    db: AsyncSession = Depends(get_db)
+):
+    """Allows Form Teachers, Principals, or School Admins to attach terminal comments to a student's record."""
+    q = select(TerminalRemark).where(
+        TerminalRemark.school_id == tenant_id,
+        TerminalRemark.student_id == payload.student_id,
+        TerminalRemark.session == payload.session,
+        TerminalRemark.term == payload.term
+    )
+    res = await db.execute(q)
+    remark = res.scalars().first()
+
+    if not remark:
+        remark = TerminalRemark(
+            school_id=tenant_id,
+            student_id=payload.student_id,
+            session=payload.session,
+            term=payload.term,
+            form_teacher_remark=payload.form_teacher_remark,
+            principal_remark=payload.principal_remark
+        )
+        db.add(remark)
+    else:
+        if payload.form_teacher_remark is not None:
+            remark.form_teacher_remark = payload.form_teacher_remark
+        if payload.principal_remark is not None:
+            remark.principal_remark = payload.principal_remark
+
+    await db.commit()
+    await db.refresh(remark)
+
+    return RemarkResponse(
+        student_id=remark.student_id,
+        session=remark.session,
+        term=remark.term,
+        form_teacher_remark=remark.form_teacher_remark,
+        principal_remark=remark.principal_remark,
+        message="Terminal remark updated successfully."
+    )
+
+# --- 4. Result Approval Workflow ---
 @router.patch("/status", response_model=StatusUpdateResponse)
 async def update_result_status(
     payload: ResultStatusUpdate,
@@ -195,6 +250,7 @@ async def update_result_status(
         "message": f"Successfully transitioned {res.rowcount} result entries to {payload.target_status.value}."
     }
 
+# --- 5. Class Broadsheet Matrix (Tier 2 Only) ---
 @router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse, dependencies=[Depends(require_tier(2))])
 async def get_class_broadsheet(
     class_arm_id: uuid.UUID,
@@ -212,6 +268,7 @@ async def get_class_broadsheet(
     student_map = {s.id: s for s in students}
     student_ids = list(student_map.keys())
 
+    # Fetch results
     results_q = (
         select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
         .join(Subject, Result.subject_id == Subject.id)
@@ -224,6 +281,16 @@ async def get_class_broadsheet(
     )
     results_res = await db.execute(results_q)
     rows = results_res.all()
+
+    # Fetch terminal remarks
+    remarks_q = select(TerminalRemark).where(
+        TerminalRemark.school_id == tenant_id,
+        TerminalRemark.session == session,
+        TerminalRemark.term == term,
+        TerminalRemark.student_id.in_(student_ids)
+    )
+    remarks_res = await db.execute(remarks_q)
+    remark_map = {r.student_id: r.form_teacher_remark for r in remarks_res.scalars().all()}
 
     subject_dict = {}
     student_scores = {s_id: {} for s_id in student_ids}
@@ -245,7 +312,8 @@ async def get_class_broadsheet(
             "subject_scores": scores,
             "total_aggregate": agg,
             "average_score": avg,
-            "position": 0
+            "position": 0,
+            "form_teacher_remark": remark_map.get(s_id)
         })
 
     broadsheet_rows.sort(key=lambda x: x["total_aggregate"], reverse=True)
@@ -262,6 +330,54 @@ async def get_class_broadsheet(
         rows=[BroadsheetRow(**r) for r in broadsheet_rows]
     )
 
+# --- 6. Excel Broadsheet Export (`.xlsx`) ---
+@router.get("/broadsheet/export", dependencies=[Depends(require_tier(2))])
+async def export_class_broadsheet_excel(
+    class_arm_id: uuid.UUID,
+    session: str,
+    term: str,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Generates and downloads a .xlsx spreadsheet broadsheet for offline school executive meetings."""
+    broadsheet = await get_class_broadsheet(class_arm_id, session, term, tenant_id, db)
+
+    arm_q = select(ClassArm).where(ClassArm.id == class_arm_id)
+    arm_res = await db.execute(arm_q)
+    arm = arm_res.scalars().first()
+    arm_name = arm.name if arm else "Class_Arm"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Broadsheet_{session.replace('/', '_')}"
+
+    # Header Row
+    headers = ["Position", "Admission No", "Student Name"]
+    subject_codes = [s["code"] for s in broadsheet.subjects]
+    headers.extend(subject_codes)
+    headers.extend(["Total Aggregate", "Average Score", "Form Teacher Remark"])
+    ws.append(headers)
+
+    # Data Rows
+    for row in broadsheet.rows:
+        data_row = [row.position, row.admission_number, row.student_name]
+        for code in subject_codes:
+            data_row.append(row.subject_scores.get(code, "-"))
+        data_row.extend([row.total_aggregate, round(row.average_score, 2), row.form_teacher_remark or ""])
+        ws.append(data_row)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"Broadsheet_{arm_name}_{session}_{term}.xlsx".replace(" ", "_")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# --- 7. Admin / Teacher Result Sheet Viewer ---
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
     student_id: uuid.UUID,
@@ -289,6 +405,15 @@ async def get_admin_student_results(
     results_res = await db.execute(results_q)
     rows = results_res.all()
 
+    remarks_q = select(TerminalRemark).where(
+        TerminalRemark.school_id == tenant_id,
+        TerminalRemark.student_id == student.id,
+        TerminalRemark.session == session,
+        TerminalRemark.term == term
+    )
+    remarks_res = await db.execute(remarks_q)
+    remark = remarks_res.scalars().first()
+
     scores = [
         ScoreDetail(
             subject_id=r.Result.subject_id,
@@ -315,9 +440,12 @@ async def get_admin_student_results(
         term=term,
         pin_remaining_uses=None,
         term_average=round(term_avg, 2),
+        form_teacher_remark=remark.form_teacher_remark if remark else None,
+        principal_remark=remark.principal_remark if remark else None,
         results=scores
     )
 
+# --- 8. Public PIN-Protected Result Verification Engine ---
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
     payload: CheckResultRequest,
@@ -366,6 +494,15 @@ async def verify_pin_and_get_results(
             detail="No published results available for this term/session yet. Contact your school administration."
         )
 
+    remarks_q = select(TerminalRemark).where(
+        TerminalRemark.school_id == tenant_id,
+        TerminalRemark.student_id == student.id,
+        TerminalRemark.session == payload.session,
+        TerminalRemark.term == payload.term
+    )
+    remarks_res = await db.execute(remarks_q)
+    remark = remarks_res.scalars().first()
+
     pin.times_used += 1
     await db.commit()
 
@@ -409,5 +546,7 @@ async def verify_pin_and_get_results(
         term_average=round(term_avg, 2),
         strongest_subject=strongest_subject,
         weakest_subject=weakest_subject,
+        form_teacher_remark=remark.form_teacher_remark if remark else None,
+        principal_remark=remark.principal_remark if remark else None,
         results=scores
     )

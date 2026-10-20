@@ -75,3 +75,20 @@ class BroadsheetResponse(BaseModel):
     term: str
     subjects: List[Dict[str, str]]
     rows: List[BroadsheetRow]
+    
+    
+# --- Remarks Schema ---
+class RemarkUpdatePayload(BaseModel):
+    student_id: uuid.UUID
+    session: str
+    term: str
+    form_teacher_remark: Optional[str] = None
+    principal_remark: Optional[str] = None
+
+class RemarkResponse(BaseModel):
+    student_id: uuid.UUID
+    session: str
+    term: str
+    form_teacher_remark: Optional[str] = None
+    principal_remark: Optional[str] = None
+    message: str
