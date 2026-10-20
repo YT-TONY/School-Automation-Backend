@@ -9,8 +9,9 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import require_roles
-from app.core.tenant import require_tenant_id, require_tier
+from app.core.tenant import require_tenant_id, require_tier, get_current_school
 from app.models.hostel import Hostel, HostelRoom, BedAllocation, ReservationStatus
+from app.models.school import School, SchoolType
 from app.models.student import Student
 from app.models.user import User, UserRole
 from app.schemas.hostel import (
@@ -25,8 +26,19 @@ router = APIRouter()
 
 ADMIN_ROLES = [UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN]
 
+# --- Dependency: Restrict Hostel Features to BOARDING or MIXED Schools Only ---
+async def require_boarding_or_mixed_school(
+    school: School = Depends(get_current_school)
+):
+    if school.school_type == SchoolType.DAY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hostel and boarding management is disabled for Day-only institutions."
+        )
+    return school
+
 # --- 1. Admin Hostel Setup ---
-@router.post("/", response_model=HostelResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_tier(2))])
+@router.post("/", response_model=HostelResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_tier(2)), Depends(require_boarding_or_mixed_school)])
 async def create_hostel_and_rooms(
     payload: HostelCreate,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
@@ -54,13 +66,12 @@ async def create_hostel_and_rooms(
 
     await db.commit()
     
-    # Reload with relationships
     query = select(Hostel).options(selectinload(Hostel.rooms)).where(Hostel.id == hostel.id)
     res = await db.execute(query)
     return res.scalars().first()
 
 # --- 2. List Hostels & Availability ---
-@router.get("/", response_model=List[HostelResponse], dependencies=[Depends(require_tier(2))])
+@router.get("/", response_model=List[HostelResponse], dependencies=[Depends(require_tier(2)), Depends(require_boarding_or_mixed_school)])
 async def list_hostels(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
@@ -92,20 +103,18 @@ async def list_hostels(
     return response
 
 # --- 3. Student Self-Service Bed Space Reservation ---
-@router.post("/reserve-bed", response_model=BedReservationResponse, dependencies=[Depends(require_tier(2))])
+@router.post("/reserve-bed", response_model=BedReservationResponse, dependencies=[Depends(require_tier(2)), Depends(require_boarding_or_mixed_school)])
 async def reserve_bed_space(
     payload: BedReservationRequest,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    # Verify Student
     student_q = select(Student).where(Student.id == payload.student_id, Student.school_id == tenant_id)
     student_res = await db.execute(student_q)
     student = student_res.scalars().first()
     if not student:
         raise HTTPException(status_code=404, detail="Student record not found.")
 
-    # Verify Room & Capacity
     room_q = select(HostelRoom).options(selectinload(HostelRoom.allocations), selectinload(HostelRoom.hostel)).where(
         HostelRoom.id == payload.room_id,
         HostelRoom.school_id == tenant_id
@@ -119,7 +128,6 @@ async def reserve_bed_space(
     if len(active_allocations) >= room.capacity:
         raise HTTPException(status_code=400, detail="This room is fully booked. Please select another room.")
 
-    # Prevent duplicate active reservations for same session/term
     existing_q = select(BedAllocation).where(
         BedAllocation.school_id == tenant_id,
         BedAllocation.student_id == payload.student_id,

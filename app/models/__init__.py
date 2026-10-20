@@ -9,6 +9,10 @@ from app.models.result import Result, ResultStatus
 from app.models.pin import ResultPin
 from app.models.teacher_assignment import TeacherAssignment
 from app.models.fee import FeeItem, FeeType, StudentFeeSelection
+from app.models.remark import TerminalRemark
+from app.models.audit import ResultStatusAudit
+from app.models.psychomotor import AffectivePsychomotorDomain
+from app.models.hostel import Hostel, HostelRoom, BedAllocation, ReservationStatus
 
 __all__ = [
     "Base",
@@ -26,4 +30,11 @@ __all__ = [
     "FeeItem",
     "FeeType",
     "StudentFeeSelection",
+    "TerminalRemark",
+    "ResultStatusAudit",
+    "AffectivePsychomotorDomain",
+    "Hostel",
+    "HostelRoom",
+    "BedAllocation",
+    "ReservationStatus",
 ]

@@ -3,24 +3,29 @@
 import csv
 import io
 import uuid
-from typing import List
+from typing import List, Dict, Set
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
-from sqlalchemy import update
+from sqlalchemy import update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 import openpyxl
+from jinja2 import Template
 
 from app.core.database import get_db
-from app.core.security import require_roles
-from app.core.tenant import require_tenant_id, require_tier
+from app.core.security import require_roles, get_current_active_user
+from app.core.tenant import require_tenant_id, require_tier, get_current_school
 from app.models.academic import Subject, ClassArm
+from app.models.audit import ResultStatusAudit
 from app.models.pin import ResultPin
+from app.models.psychomotor import AffectivePsychomotorDomain
 from app.models.remark import TerminalRemark
 from app.models.result import Result, ResultStatus
+from app.models.school import School
 from app.models.student import Student
 from app.models.teacher_assignment import TeacherAssignment
 from app.models.user import User, UserRole
+from app.schemas.psychomotor import AffectivePsychomotorPayload, AffectivePsychomotorResponse
 from app.schemas.result import (
     CheckResultRequest,
     ResultEntry,
@@ -36,7 +41,19 @@ from app.schemas.result import (
 
 router = APIRouter()
 
-# --- Helper: Verify Teacher Allocation Guard ---
+VALID_PREDECESSORS: Dict[ResultStatus, Set[ResultStatus]] = {
+    ResultStatus.SUBMITTED_BY_TEACHER: {ResultStatus.DRAFT},
+    ResultStatus.COMPILED_BY_CLASS_TEACHER: {ResultStatus.SUBMITTED_BY_TEACHER},
+    ResultStatus.APPROVED_BY_VP: {ResultStatus.COMPILED_BY_CLASS_TEACHER},
+    ResultStatus.PUBLISHED: {ResultStatus.APPROVED_BY_VP},
+    ResultStatus.DRAFT: {
+        ResultStatus.SUBMITTED_BY_TEACHER,
+        ResultStatus.COMPILED_BY_CLASS_TEACHER,
+        ResultStatus.APPROVED_BY_VP,
+        ResultStatus.PUBLISHED
+    }
+}
+
 async def _verify_teacher_assignment(
     user: User,
     subject_id: uuid.UUID,
@@ -76,13 +93,7 @@ async def upload_results(
     for entry in entries:
         ca_total = entry.ca_score if entry.ca_score is not None else (entry.test1_score + entry.test2_score + entry.assignment_score)
         total = ca_total + entry.exam_score
-        grade = (
-            "A" if total >= 70
-            else "B" if total >= 60
-            else "C" if total >= 50
-            else "D" if total >= 45
-            else "F"
-        )
+        grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
 
         res = Result(
             school_id=tenant_id,
@@ -144,7 +155,6 @@ async def upload_results_csv(
         exam = float(row.get("exam", 0.0))
         ca_tot = t1 + t2 + assign
         total = ca_tot + exam
-
         grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
 
         res = Result(
@@ -168,7 +178,212 @@ async def upload_results_csv(
     await db.commit()
     return {"parsed_and_inserted": len(db_objects), "filename": file.filename}
 
-# --- 3. Form Teacher & Principal Terminal Remarks Endpoint ---
+# --- 3. Affective & Psychomotor Scale Ingestion ---
+@router.patch("/behavioral-ratings", response_model=AffectivePsychomotorResponse, dependencies=[Depends(require_tier(2))])
+async def update_behavioral_ratings(
+    payload: AffectivePsychomotorPayload,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(require_roles([UserRole.FORM_TEACHER, UserRole.SCHOOL_ADMIN, UserRole.PRINCIPAL, UserRole.SUPER_ADMIN])),
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(AffectivePsychomotorDomain).where(
+        AffectivePsychomotorDomain.school_id == tenant_id,
+        AffectivePsychomotorDomain.student_id == payload.student_id,
+        AffectivePsychomotorDomain.session == payload.session,
+        AffectivePsychomotorDomain.term == payload.term
+    )
+    res = await db.execute(q)
+    rating = res.scalars().first()
+
+    if not rating:
+        rating = AffectivePsychomotorDomain(
+            school_id=tenant_id,
+            student_id=payload.student_id,
+            session=payload.session,
+            term=payload.term,
+            punctuality=payload.punctuality,
+            neatness=payload.neatness,
+            leadership=payload.leadership,
+            honesty=payload.honesty,
+            politeness=payload.politeness,
+            handwriting=payload.handwriting,
+            sports_and_games=payload.sports_and_games,
+            craft_and_art=payload.craft_and_art
+        )
+        db.add(rating)
+    else:
+        rating.punctuality = payload.punctuality
+        rating.neatness = payload.neatness
+        rating.leadership = payload.leadership
+        rating.honesty = payload.honesty
+        rating.politeness = payload.politeness
+        rating.handwriting = payload.handwriting
+        rating.sports_and_games = payload.sports_and_games
+        rating.craft_and_art = payload.craft_and_art
+
+    await db.commit()
+    await db.refresh(rating)
+
+    resp = AffectivePsychomotorResponse.model_validate(rating)
+    resp.message = "Affective & Psychomotor ratings updated successfully."
+    return resp
+
+# --- 4. Historical Term Performance Trend Comparison ---
+@router.get("/historical-trends/student/{student_id}", dependencies=[Depends(require_tier(2))])
+async def get_student_historical_trends(
+    student_id: uuid.UUID,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Compares average scores across all previous terms and sessions for trend visualization."""
+    q = (
+        select(
+            Result.session,
+            Result.term,
+            func.avg(Result.total_score).label("term_average"),
+            func.sum(Result.total_score).label("total_aggregate"),
+            func.count(Result.id).label("subject_count")
+        )
+        .where(
+            Result.school_id == tenant_id,
+            Result.student_id == student_id,
+            Result.status == ResultStatus.PUBLISHED
+        )
+        .group_by(Result.session, Result.term)
+        .order_by(Result.session.asc(), Result.term.asc())
+    )
+    res = await db.execute(q)
+    rows = res.all()
+
+    trends = [
+        {
+            "session": r.session,
+            "term": r.term,
+            "term_average": round(float(r.term_average), 2),
+            "total_aggregate": float(r.total_aggregate),
+            "subject_count": r.subject_count
+        } for r in rows
+    ]
+    return {"student_id": student_id, "historical_terms_count": len(trends), "performance_history": trends}
+
+# --- 5. PDF Report Card Generation Stream ---
+@router.get("/download-pdf", dependencies=[Depends(require_tier(2))])
+async def download_student_report_card_pdf(
+    student_id: uuid.UUID,
+    session: str,
+    term: str,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    school: School = Depends(get_current_school),
+    db: AsyncSession = Depends(get_db)
+):
+    student_q = select(Student).where(Student.id == student_id, Student.school_id == tenant_id)
+    student_res = await db.execute(student_q)
+    student = student_res.scalars().first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student record not found.")
+
+    results_q = (
+        select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
+        .join(Subject, Result.subject_id == Subject.id)
+        .where(
+            Result.student_id == student.id,
+            Result.session == session,
+            Result.term == term,
+            Result.school_id == tenant_id
+        )
+    )
+    results_res = await db.execute(results_q)
+    rows = results_res.all()
+
+    scores = [
+        {
+            "subject": r.subject_name,
+            "ca": r.Result.ca_score,
+            "exam": r.Result.exam_score,
+            "total": r.Result.total_score,
+            "grade": r.Result.grade
+        } for r in rows
+    ]
+    term_avg = round((sum(s["total"] for s in scores) / len(scores)), 2) if scores else 0.0
+
+    html_template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 20px; color: #1e293b; }
+            .header { text-align: center; border-bottom: 2px solid #1e3a8a; padding-bottom: 10px; }
+            .school-name { font-size: 24px; font-weight: bold; color: {{ primary_color }}; }
+            .details { margin: 20px 0; display: flex; justify-content: space-between; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+            th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; }
+            th { background-color: #f1f5f9; }
+            .summary { margin-top: 20px; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div class="school-name">{{ school_name }}</div>
+            <div>OFFICIAL TERMINAL REPORT CARD</div>
+            <div>{{ term }} - {{ session }}</div>
+        </div>
+        <div class="details">
+            <div><strong>Student:</strong> {{ student_name }} ({{ admission_number }})</div>
+            <div><strong>Average:</strong> {{ term_average }}%</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Subject</th><th>CA Score</th><th>Exam Score</th><th>Total</th><th>Grade</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in scores %}
+                <tr>
+                    <td>{{ item.subject }}</td>
+                    <td>{{ item.ca }}</td>
+                    <td>{{ item.exam }}</td>
+                    <td>{{ item.total }}</td>
+                    <td>{{ item.grade }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <div class="summary">Term Average Score: {{ term_average }}%</div>
+    </body>
+    </html>
+    """
+
+    template = Template(html_template)
+    rendered_html = template.render(
+        school_name=school.name,
+        primary_color=school.branding.get("primary_color", "#1E3A8A"),
+        student_name=student.full_name,
+        admission_number=student.admission_number,
+        session=session,
+        term=term,
+        scores=scores,
+        term_average=term_avg
+    )
+
+    try:
+        from weasyprint import HTML
+        pdf_bytes = HTML(string=rendered_html).write_pdf()
+        media_type = "application/pdf"
+        filename = f"Report_Card_{student.admission_number}_{session}_{term}.pdf".replace(" ", "_")
+    except ImportError:
+        # Graceful fallback to HTML stream if WeasyPrint binary isn't preinstalled on host environment
+        pdf_bytes = rendered_html.encode("utf-8")
+        media_type = "text/html"
+        filename = f"Report_Card_{student.admission_number}_{session}_{term}.html".replace(" ", "_")
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# --- 6. Form Teacher & Principal Remarks ---
 @router.patch("/remarks", response_model=RemarkResponse, dependencies=[Depends(require_tier(2))])
 async def update_terminal_remarks(
     payload: RemarkUpdatePayload,
@@ -176,7 +391,6 @@ async def update_terminal_remarks(
     current_user: User = Depends(require_roles([UserRole.FORM_TEACHER, UserRole.SCHOOL_ADMIN, UserRole.PRINCIPAL, UserRole.SUPER_ADMIN])),
     db: AsyncSession = Depends(get_db)
 ):
-    """Allows Form Teachers, Principals, or School Admins to attach terminal comments to a student's record."""
     q = select(TerminalRemark).where(
         TerminalRemark.school_id == tenant_id,
         TerminalRemark.student_id == payload.student_id,
@@ -214,43 +428,86 @@ async def update_terminal_remarks(
         message="Terminal remark updated successfully."
     )
 
-# --- 4. Result Approval Workflow ---
+# --- 7. Result Approval Workflow with Transition Gates & Audit Logging ---
 @router.patch("/status", response_model=StatusUpdateResponse)
 async def update_result_status(
     payload: ResultStatusUpdate,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
-    stmt = (
-        update(Result)
-        .where(
-            Result.school_id == tenant_id,
-            Result.session == payload.session,
-            Result.term == payload.term
-        )
-        .values(status=payload.target_status)
+    target = payload.target_status
+    if target == ResultStatus.COMPILED_BY_CLASS_TEACHER and not (current_user.is_class_teacher or current_user.role in [UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN, UserRole.FORM_TEACHER]):
+        raise HTTPException(status_code=403, detail="Only Form/Class Teachers or Admins can transition results to COMPILED.")
+
+    if target == ResultStatus.APPROVED_BY_VP and not (current_user.role in [UserRole.VICE_PRINCIPAL_ACADEMIC, UserRole.PRINCIPAL, UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN] or current_user.can_approve_results):
+        raise HTTPException(status_code=403, detail="Only Vice Principals or authorized approvers can approve results.")
+
+    if target == ResultStatus.PUBLISHED and not (current_user.role in [UserRole.VICE_PRINCIPAL_ACADEMIC, UserRole.PRINCIPAL, UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN] or current_user.can_approve_results or current_user.is_exam_officer):
+        raise HTTPException(status_code=403, detail="Only Vice Principals, Exam Officers, or Admins can publish final gradebooks.")
+
+    query = select(Result).where(
+        Result.school_id == tenant_id,
+        Result.session == payload.session,
+        Result.term == payload.term
     )
-
     if payload.student_id:
-        stmt = stmt.where(Result.student_id == payload.student_id)
-
+        query = query.where(Result.student_id == payload.student_id)
     if payload.class_arm_id:
         student_subquery = select(Student.id).where(
             Student.school_id == tenant_id,
             Student.class_arm_id == payload.class_arm_id
         )
-        stmt = stmt.where(Result.student_id.in_(student_subquery))
+        query = query.where(Result.student_id.in_(student_subquery))
 
-    res = await db.execute(stmt)
+    res = await db.execute(query)
+    existing_results = res.scalars().all()
+
+    if not existing_results:
+        raise HTTPException(status_code=404, detail="No matching result entries found to transition.")
+
+    allowed_preds = VALID_PREDECESSORS.get(target, set())
+    invalid_transitions = [r for r in existing_results if r.status not in allowed_preds]
+
+    is_admin = current_user.role in [UserRole.SCHOOL_ADMIN, UserRole.SUPER_ADMIN]
+    if invalid_transitions and not is_admin:
+        sample = invalid_transitions[0]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Illegal transition gate skip: Cannot move results from '{sample.status.value}' directly to '{target.value}' without intermediate approval."
+        )
+
+    previous_statuses = {r.status.value for r in existing_results}
+    prev_status_summary = ", ".join(previous_statuses)
+
+    stmt = (
+        update(Result)
+        .where(Result.id.in_([r.id for r in existing_results]))
+        .values(status=target)
+    )
+    await db.execute(stmt)
+
+    audit_log = ResultStatusAudit(
+        school_id=tenant_id,
+        user_id=current_user.id,
+        session=payload.session,
+        term=payload.term,
+        class_arm_id=payload.class_arm_id,
+        student_id=payload.student_id,
+        previous_status=prev_status_summary,
+        target_status=target,
+        records_affected=len(existing_results)
+    )
+    db.add(audit_log)
     await db.commit()
 
     return {
-        "updated_count": res.rowcount,
-        "new_status": payload.target_status,
-        "message": f"Successfully transitioned {res.rowcount} result entries to {payload.target_status.value}."
+        "updated_count": len(existing_results),
+        "new_status": target,
+        "message": f"Successfully transitioned {len(existing_results)} result entries to {target.value}. Transition logged to audit ledger."
     }
 
-# --- 5. Class Broadsheet Matrix (Tier 2 Only) ---
+# --- 8. Class Broadsheet Matrix (Tier 2 Only) ---
 @router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse, dependencies=[Depends(require_tier(2))])
 async def get_class_broadsheet(
     class_arm_id: uuid.UUID,
@@ -268,7 +525,6 @@ async def get_class_broadsheet(
     student_map = {s.id: s for s in students}
     student_ids = list(student_map.keys())
 
-    # Fetch results
     results_q = (
         select(Result, Subject.name.label("subject_name"), Subject.code.label("subject_code"))
         .join(Subject, Result.subject_id == Subject.id)
@@ -282,7 +538,6 @@ async def get_class_broadsheet(
     results_res = await db.execute(results_q)
     rows = results_res.all()
 
-    # Fetch terminal remarks
     remarks_q = select(TerminalRemark).where(
         TerminalRemark.school_id == tenant_id,
         TerminalRemark.session == session,
@@ -330,7 +585,7 @@ async def get_class_broadsheet(
         rows=[BroadsheetRow(**r) for r in broadsheet_rows]
     )
 
-# --- 6. Excel Broadsheet Export (`.xlsx`) ---
+# --- 9. Excel Broadsheet Export (`.xlsx`) ---
 @router.get("/broadsheet/export", dependencies=[Depends(require_tier(2))])
 async def export_class_broadsheet_excel(
     class_arm_id: uuid.UUID,
@@ -339,7 +594,6 @@ async def export_class_broadsheet_excel(
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generates and downloads a .xlsx spreadsheet broadsheet for offline school executive meetings."""
     broadsheet = await get_class_broadsheet(class_arm_id, session, term, tenant_id, db)
 
     arm_q = select(ClassArm).where(ClassArm.id == class_arm_id)
@@ -351,14 +605,12 @@ async def export_class_broadsheet_excel(
     ws = wb.active
     ws.title = f"Broadsheet_{session.replace('/', '_')}"
 
-    # Header Row
     headers = ["Position", "Admission No", "Student Name"]
     subject_codes = [s["code"] for s in broadsheet.subjects]
     headers.extend(subject_codes)
     headers.extend(["Total Aggregate", "Average Score", "Form Teacher Remark"])
     ws.append(headers)
 
-    # Data Rows
     for row in broadsheet.rows:
         data_row = [row.position, row.admission_number, row.student_name]
         for code in subject_codes:
@@ -377,7 +629,7 @@ async def export_class_broadsheet_excel(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# --- 7. Admin / Teacher Result Sheet Viewer ---
+# --- 10. Admin / Teacher Result Sheet Viewer ---
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
     student_id: uuid.UUID,
@@ -445,7 +697,7 @@ async def get_admin_student_results(
         results=scores
     )
 
-# --- 8. Public PIN-Protected Result Verification Engine ---
+# --- 11. Public PIN-Protected Result Verification Engine ---
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
     payload: CheckResultRequest,

@@ -10,7 +10,8 @@ from app.api.v1.endpoints import (
     students,
     results,
     pins,
-    fees
+    fees,
+    hostels,
 )
 
 api_router = APIRouter()
@@ -24,3 +25,4 @@ api_router.include_router(students.router, prefix="/students", tags=["Students"]
 api_router.include_router(results.router, prefix="/results", tags=["Result Engine"])
 api_router.include_router(pins.router, prefix="/pins", tags=["Scratch PIN Engine"])
 api_router.include_router(fees.router, prefix="/fees", tags=["Fee Management & Invoicing (Tier 2)"])
+api_router.include_router(hostels.router, prefix="/hostels", tags=["Hostel & Boarding System (Boarding/Mixed Tier 2)"])

@@ -13,8 +13,16 @@ from app.schemas.result import (
     ScoreDetail,
     BroadsheetRow,
     BroadsheetResponse,
+    RemarkUpdatePayload,
+    RemarkResponse,
 )
-from app.schemas.pin import PinGenerateRequest, PinGenerateResponse, PinResponse
+from app.schemas.pin import (
+    PinGenerateRequest,
+    PinGenerateResponse,
+    PinResponse,
+    OnlinePinPurchaseRequest,
+    OnlinePinPurchaseResponse,
+)
 from app.schemas.academic import (
     ClassArmCreate,
     ClassArmResponse,
@@ -27,6 +35,17 @@ from app.schemas.fee import (
     PackageSelectionRequest,
     StudentInvoiceResponse,
     FeeItemDetail,
+)
+from app.schemas.psychomotor import (
+    AffectivePsychomotorPayload,
+    AffectivePsychomotorResponse,
+)
+from app.schemas.hostel import (
+    HostelCreate,
+    HostelResponse,
+    HostelRoomResponse,
+    BedReservationRequest,
+    BedReservationResponse,
 )
 
 __all__ = [
@@ -46,9 +65,13 @@ __all__ = [
     "ScoreDetail",
     "BroadsheetRow",
     "BroadsheetResponse",
+    "RemarkUpdatePayload",
+    "RemarkResponse",
     "PinGenerateRequest",
     "PinGenerateResponse",
     "PinResponse",
+    "OnlinePinPurchaseRequest",
+    "OnlinePinPurchaseResponse",
     "ClassArmCreate",
     "ClassArmResponse",
     "SubjectCreate",
@@ -58,4 +81,11 @@ __all__ = [
     "PackageSelectionRequest",
     "StudentInvoiceResponse",
     "FeeItemDetail",
+    "AffectivePsychomotorPayload",
+    "AffectivePsychomotorResponse",
+    "HostelCreate",
+    "HostelResponse",
+    "HostelRoomResponse",
+    "BedReservationRequest",
+    "BedReservationResponse",
 ]
