@@ -3,7 +3,7 @@
 import csv
 import io
 import uuid
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy import update, func
@@ -17,6 +17,7 @@ from app.core.security import require_roles, get_current_active_user
 from app.core.tenant import require_tenant_id, require_tier, get_current_school
 from app.models.academic import Subject, ClassArm
 from app.models.audit import ResultStatusAudit
+from app.models.grading import GradingScale
 from app.models.pin import ResultPin
 from app.models.psychomotor import AffectivePsychomotorDomain
 from app.models.remark import TerminalRemark
@@ -25,6 +26,7 @@ from app.models.school import School
 from app.models.student import Student
 from app.models.teacher_assignment import TeacherAssignment
 from app.models.user import User, UserRole
+from app.schemas.audit import ResultStatusAuditResponse
 from app.schemas.psychomotor import AffectivePsychomotorPayload, AffectivePsychomotorResponse
 from app.schemas.result import (
     CheckResultRequest,
@@ -77,6 +79,30 @@ async def _verify_teacher_assignment(
             detail="You are not authorized to upload scores for this subject and class arm."
         )
 
+# Helper: Dynamic Grade Resolution Engine
+async def _resolve_grade(total_score: float, tenant_id: uuid.UUID, db: AsyncSession) -> str:
+    scales_q = select(GradingScale).where(GradingScale.school_id == tenant_id).order_by(GradingScale.min_score.desc())
+    scales_res = await db.execute(scales_q)
+    scales = scales_res.scalars().all()
+
+    if scales:
+        for scale in scales:
+            if scale.min_score <= total_score <= scale.max_score:
+                return scale.grade_letter
+            if total_score >= scale.min_score and scale == scales[0]:
+                return scale.grade_letter
+
+    # Default WAEC Standard Scale Fallback
+    if total_score >= 70:
+        return "A"
+    elif total_score >= 60:
+        return "B"
+    elif total_score >= 50:
+        return "C"
+    elif total_score >= 45:
+        return "D"
+    return "F"
+
 # --- 1. Batch Score Ingestion ---
 @router.post("/batch-upload", status_code=status.HTTP_201_CREATED)
 async def upload_results(
@@ -93,7 +119,7 @@ async def upload_results(
     for entry in entries:
         ca_total = entry.ca_score if entry.ca_score is not None else (entry.test1_score + entry.test2_score + entry.assignment_score)
         total = ca_total + entry.exam_score
-        grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
+        grade = await _resolve_grade(total, tenant_id, db)
 
         res = Result(
             school_id=tenant_id,
@@ -155,7 +181,7 @@ async def upload_results_csv(
         exam = float(row.get("exam", 0.0))
         ca_tot = t1 + t2 + assign
         total = ca_tot + exam
-        grade = "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 50 else "D" if total >= 45 else "F"
+        grade = await _resolve_grade(total, tenant_id, db)
 
         res = Result(
             school_id=tenant_id,
@@ -178,7 +204,52 @@ async def upload_results_csv(
     await db.commit()
     return {"parsed_and_inserted": len(db_objects), "filename": file.filename}
 
-# --- 3. Affective & Psychomotor Scale Ingestion ---
+# --- 3. Audit Log Review Endpoint ---
+@router.get("/audits", response_model=List[ResultStatusAuditResponse])
+async def list_result_audits(
+    session: Optional[str] = None,
+    term: Optional[str] = None,
+    class_arm_id: Optional[uuid.UUID] = None,
+    student_id: Optional[uuid.UUID] = None,
+    user_id: Optional[uuid.UUID] = None,
+    skip: int = 0,
+    limit: int = 100,
+    tenant_id: uuid.UUID = Depends(require_tenant_id),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Allows Vice Principals, Exam Officers, and Admins to inspect historical result status transitions."""
+    ALLOWED_ROLES = [
+        UserRole.SCHOOL_ADMIN,
+        UserRole.SUPER_ADMIN,
+        UserRole.PRINCIPAL,
+        UserRole.VICE_PRINCIPAL_ACADEMIC,
+        UserRole.VICE_PRINCIPAL_ADMIN
+    ]
+    if current_user.role not in ALLOWED_ROLES and not current_user.is_exam_officer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to view result transition audit logs."
+        )
+
+    query = select(ResultStatusAudit).where(ResultStatusAudit.school_id == tenant_id)
+
+    if session:
+        query = query.where(ResultStatusAudit.session == session)
+    if term:
+        query = query.where(ResultStatusAudit.term == term)
+    if class_arm_id:
+        query = query.where(ResultStatusAudit.class_arm_id == class_arm_id)
+    if student_id:
+        query = query.where(ResultStatusAudit.student_id == student_id)
+    if user_id:
+        query = query.where(ResultStatusAudit.user_id == user_id)
+
+    query = query.order_by(ResultStatusAudit.created_at.desc()).offset(skip).limit(limit)
+    res = await db.execute(query)
+    return res.scalars().all()
+
+# --- 4. Behavioral Ratings ---
 @router.patch("/behavioral-ratings", response_model=AffectivePsychomotorResponse, dependencies=[Depends(require_tier(2))])
 async def update_behavioral_ratings(
     payload: AffectivePsychomotorPayload,
@@ -228,14 +299,13 @@ async def update_behavioral_ratings(
     resp.message = "Affective & Psychomotor ratings updated successfully."
     return resp
 
-# --- 4. Historical Term Performance Trend Comparison ---
+# --- 5. Historical Trends ---
 @router.get("/historical-trends/student/{student_id}", dependencies=[Depends(require_tier(2))])
 async def get_student_historical_trends(
     student_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Compares average scores across all previous terms and sessions for trend visualization."""
     q = (
         select(
             Result.session,
@@ -266,7 +336,7 @@ async def get_student_historical_trends(
     ]
     return {"student_id": student_id, "historical_terms_count": len(trends), "performance_history": trends}
 
-# --- 5. PDF Report Card Generation Stream ---
+# --- 6. PDF Report Card Download ---
 @router.get("/download-pdf", dependencies=[Depends(require_tier(2))])
 async def download_student_report_card_pdf(
     student_id: uuid.UUID,
@@ -372,7 +442,6 @@ async def download_student_report_card_pdf(
         media_type = "application/pdf"
         filename = f"Report_Card_{student.admission_number}_{session}_{term}.pdf".replace(" ", "_")
     except ImportError:
-        # Graceful fallback to HTML stream if WeasyPrint binary isn't preinstalled on host environment
         pdf_bytes = rendered_html.encode("utf-8")
         media_type = "text/html"
         filename = f"Report_Card_{student.admission_number}_{session}_{term}.html".replace(" ", "_")
@@ -383,7 +452,7 @@ async def download_student_report_card_pdf(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# --- 6. Form Teacher & Principal Remarks ---
+# --- 7. Remarks ---
 @router.patch("/remarks", response_model=RemarkResponse, dependencies=[Depends(require_tier(2))])
 async def update_terminal_remarks(
     payload: RemarkUpdatePayload,
@@ -428,7 +497,7 @@ async def update_terminal_remarks(
         message="Terminal remark updated successfully."
     )
 
-# --- 7. Result Approval Workflow with Transition Gates & Audit Logging ---
+# --- 8. Result Approval Workflow ---
 @router.patch("/status", response_model=StatusUpdateResponse)
 async def update_result_status(
     payload: ResultStatusUpdate,
@@ -507,7 +576,7 @@ async def update_result_status(
         "message": f"Successfully transitioned {len(existing_results)} result entries to {target.value}. Transition logged to audit ledger."
     }
 
-# --- 8. Class Broadsheet Matrix (Tier 2 Only) ---
+# --- 9. Broadsheet ---
 @router.get("/broadsheet/class-arm/{class_arm_id}", response_model=BroadsheetResponse, dependencies=[Depends(require_tier(2))])
 async def get_class_broadsheet(
     class_arm_id: uuid.UUID,
@@ -585,7 +654,7 @@ async def get_class_broadsheet(
         rows=[BroadsheetRow(**r) for r in broadsheet_rows]
     )
 
-# --- 9. Excel Broadsheet Export (`.xlsx`) ---
+# --- 10. Excel Export ---
 @router.get("/broadsheet/export", dependencies=[Depends(require_tier(2))])
 async def export_class_broadsheet_excel(
     class_arm_id: uuid.UUID,
@@ -629,7 +698,7 @@ async def export_class_broadsheet_excel(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# --- 10. Admin / Teacher Result Sheet Viewer ---
+# --- 11. Admin / Teacher Result Viewer ---
 @router.get("/admin/student/{student_id}", response_model=StudentResultSheet)
 async def get_admin_student_results(
     student_id: uuid.UUID,
@@ -697,7 +766,7 @@ async def get_admin_student_results(
         results=scores
     )
 
-# --- 11. Public PIN-Protected Result Verification Engine ---
+# --- 12. Public PIN-Protected Result Engine ---
 @router.post("/verify-and-view", response_model=StudentResultSheet)
 async def verify_pin_and_get_results(
     payload: CheckResultRequest,
