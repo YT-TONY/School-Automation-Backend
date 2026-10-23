@@ -13,7 +13,7 @@ import openpyxl
 from jinja2 import Template
 
 from app.core.database import get_db
-from app.core.security import require_roles, get_current_active_user
+from app.core.security import require_roles, get_current_user
 from app.core.tenant import require_tenant_id, require_tier, get_current_school
 from app.models.academic import Subject, ClassArm
 from app.models.audit import ResultStatusAudit
@@ -215,7 +215,7 @@ async def list_result_audits(
     skip: int = 0,
     limit: int = 100,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Allows Vice Principals, Exam Officers, and Admins to inspect historical result status transitions."""
@@ -502,7 +502,7 @@ async def update_terminal_remarks(
 async def update_result_status(
     payload: ResultStatusUpdate,
     tenant_id: uuid.UUID = Depends(require_tenant_id),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     target = payload.target_status

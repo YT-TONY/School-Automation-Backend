@@ -18,7 +18,12 @@ from app.models.user import User, UserRole
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
+
+# Standard OAuth2 scheme (Raises 401 HTTP Exception if token missing)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+# Optional OAuth2 scheme for guest checkouts (auto_error=False)
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -38,6 +43,7 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
     except JWTError:
         return None
 
+# --- Strict Authentication Dependency ---
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     tenant_id: Optional[uuid.UUID] = Depends(get_current_tenant),
@@ -81,6 +87,34 @@ async def get_current_user(
         )
 
     return user
+
+async def get_optional_current_user(
+    token: Optional[str] = Depends(oauth2_scheme_optional),
+    db: AsyncSession = Depends(get_db)
+) -> Optional[User]:
+    """Returns the authenticated User if a valid token is provided; otherwise returns None without raising 401."""
+    if not token:
+        return None
+
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+
+    user_id_str: Optional[str] = payload.get("sub")
+    if not user_id_str:
+        return None
+
+    try:
+        user_id = uuid.UUID(user_id_str)
+        query = select(User).where(User.id == user_id)
+        result = await db.execute(query)
+        user = result.scalars().first()
+        if user and user.is_active:
+            return user
+    except Exception:
+        return None
+
+    return None
 
 def require_roles(allowed_roles: List[UserRole]):
     async def role_checker(current_user: User = Depends(get_current_user)) -> User:

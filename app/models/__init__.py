@@ -13,6 +13,8 @@ from app.models.remark import TerminalRemark
 from app.models.audit import ResultStatusAudit
 from app.models.psychomotor import AffectivePsychomotorDomain
 from app.models.hostel import Hostel, HostelRoom, BedAllocation, ReservationStatus
+from app.models.grading import GradingScale
+from app.models.payment import PaymentTransaction, PaymentReceipt, PaymentStatus, PaymentType
 
 __all__ = [
     "Base",
@@ -37,4 +39,9 @@ __all__ = [
     "HostelRoom",
     "BedAllocation",
     "ReservationStatus",
+    "GradingScale",
+    "PaymentTransaction",
+    "PaymentReceipt",
+    "PaymentStatus",
+    "PaymentType",
 ]

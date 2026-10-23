@@ -28,6 +28,9 @@ class School(Base):
     subdomain: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True, index=True)
     custom_domain: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
 
+    # Paystack Routing Subaccount
+    paystack_subaccount_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
     # School Classification Type
     school_type: Mapped[SchoolType] = mapped_column(
         Enum(SchoolType, name="school_type_enum"), default=SchoolType.MIXED, nullable=False

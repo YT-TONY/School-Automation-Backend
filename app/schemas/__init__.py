@@ -25,6 +25,7 @@ from app.schemas.pin import (
 )
 from app.schemas.academic import (
     ClassArmCreate,
+    ClassArmUpdate,
     ClassArmResponse,
     SubjectCreate,
     SubjectResponse,
@@ -46,6 +47,18 @@ from app.schemas.hostel import (
     HostelRoomResponse,
     BedReservationRequest,
     BedReservationResponse,
+)
+from app.schemas.grading import (
+    GradingScaleCreate,
+    GradingScaleUpdate,
+    GradingScaleResponse,
+)
+from app.schemas.audit import ResultStatusAuditResponse
+from app.schemas.payment import (
+    PaymentInitializeRequest,
+    PaymentInitializeResponse,
+    PaymentReceiptResponse,
+    TransactionStatusResponse,
 )
 
 __all__ = [
@@ -73,6 +86,7 @@ __all__ = [
     "OnlinePinPurchaseRequest",
     "OnlinePinPurchaseResponse",
     "ClassArmCreate",
+    "ClassArmUpdate",
     "ClassArmResponse",
     "SubjectCreate",
     "SubjectResponse",
@@ -88,4 +102,12 @@ __all__ = [
     "HostelRoomResponse",
     "BedReservationRequest",
     "BedReservationResponse",
+    "GradingScaleCreate",
+    "GradingScaleUpdate",
+    "GradingScaleResponse",
+    "ResultStatusAuditResponse",
+    "PaymentInitializeRequest",
+    "PaymentInitializeResponse",
+    "PaymentReceiptResponse",
+    "TransactionStatusResponse",
 ]
