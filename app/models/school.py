@@ -31,6 +31,10 @@ class School(Base):
     # Paystack Routing Subaccount
     paystack_subaccount_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
 
+    # Dedicated Meta WhatsApp Cloud API Credentials (Tier 2 Enterprise)
+    whatsapp_phone_number_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, nullable=True, index=True)
+    whatsapp_access_token: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
     # School Classification Type
     school_type: Mapped[SchoolType] = mapped_column(
         Enum(SchoolType, name="school_type_enum"), default=SchoolType.MIXED, nullable=False
