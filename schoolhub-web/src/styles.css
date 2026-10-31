@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-display: "Bricolage Grotesque Variable", system-ui, sans-serif;
+  --font-sans: "Public Sans Variable", system-ui, sans-serif;
+  --color-paper: #f7f9f8;
+  --color-ink: #0e1f1a;
+  --color-muted: #4a5b55;
+  --color-line: #d5deda;
+  --color-deep: #0a3a2c;
+  --color-starter: #0e7a5a;
+  --color-enterprise: #3730a3;
+  --color-accent: var(--accent);
+}
+
+@theme {
+  --animate-fade-up: fade-up 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-pop: pop 0.16s ease-out both;
+  --animate-float: float 9s ease-in-out infinite;
+  @keyframes fade-up { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } }
+  @keyframes float { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(24px, -18px); } }
+}
+
+/* Accent follows the current area: home = ink, Tier 1 = green, Tier 2 = indigo */
+:root { --accent: #0e1f1a; }
+[data-page="starter"] { --accent: var(--brand, #0e7a5a); }
+[data-page="enterprise"] { --accent: #3730a3; }
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body { @apply overflow-x-clip bg-paper font-sans text-ink antialiased; }
+  h1, h2, h3 { @apply font-display; }
+  :focus-visible { @apply outline-2 outline-offset-2 outline-accent; }
+  main:focus { outline: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+
+/* Animation on scroll: main.ts adds .is-in when an element enters the viewport */
+[data-reveal] { opacity: 0; transform: translateY(28px); transition: opacity 0.7s ease-out, transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1); transition-delay: var(--d, 0ms); }
+[data-reveal="left"] { transform: translateX(-28px); }
+[data-reveal="right"] { transform: translateX(28px); }
+[data-reveal].is-in { opacity: 1; transform: none; }

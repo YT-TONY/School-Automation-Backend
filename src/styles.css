@@ -24,7 +24,7 @@
 
 /* Accent follows the current area: home = ink, Tier 1 = green, Tier 2 = indigo */
 :root { --accent: #0e1f1a; }
-[data-page="starter"] { --accent: #0e7a5a; }
+[data-page="starter"] { --accent: var(--brand, #0e7a5a); }
 [data-page="enterprise"] { --accent: #3730a3; }
 
 @layer base {

@@ -2,7 +2,8 @@ import '@fontsource-variable/bricolage-grotesque';
 import '@fontsource-variable/public-sans';
 import './styles.css';
 import { navButton, navLinks, site } from './config';
-import { session } from './api';
+import { getConfig, session } from './api';
+import { applyBrand, getBrand } from './theme';
 import { setToken } from './services/http';
 import { views } from './views';
 
@@ -76,8 +77,13 @@ function render() {
   if (redirect) { location.hash = redirect; return; }
   document.title = `${view.title} | ${site.name}`;
   document.body.dataset.page = view.accent ?? 'home';
-  main.innerHTML = view.html();
-  view.mount?.(main, new URLSearchParams(q));
+  try {
+    main.innerHTML = view.html();
+    view.mount?.(main, new URLSearchParams(q));
+  } catch (e) {
+    console.error(e);
+    main.innerHTML = '<section class="py-14"><h1 class="text-3xl font-bold">Something went wrong</h1><p class="mt-3 text-muted">This page could not be shown. <a class="font-semibold underline" href="#/">Go home</a>.</p></section>';
+  }
   reveal();
   setMenu(false);
   document.querySelectorAll<HTMLAnchorElement>('[data-path]').forEach((a) => {
@@ -86,6 +92,13 @@ function render() {
   window.scrollTo(0, 0);
   main.focus();
 }
+// Payment gateways return to "/?reference=..."; hand that over to the buy page route
+const ret = new URLSearchParams(location.search);
+const payRef = ret.get('reference') ?? ret.get('trxref');
+if (payRef) history.replaceState(null, '', `${location.pathname}#/tier1/buy-pin?reference=${encodeURIComponent(payRef)}`);
+
+applyBrand(getBrand());                          // cached brand first, no colour flash
+getConfig().then((c) => applyBrand(c.branding)).catch(() => {}); // then refresh from the backend
 window.addEventListener('hashchange', render);
 render();
 reveal();
